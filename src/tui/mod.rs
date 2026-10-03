@@ -158,6 +158,9 @@ pub fn run(index: &Index, snapshot: Snapshot, guide: Value, cache: Option<PathBu
             }
             match event::read()? {
                 Event::Resize(_, _) => {
+                    if browser.wraps_prose() {
+                        browser.preview()?;
+                    }
                     dirty = true;
                     continue;
                 }
@@ -294,6 +297,7 @@ pub fn run(index: &Index, snapshot: Snapshot, guide: Value, cache: Option<PathBu
                         Ok(Some(request)) if job.is_none() => {
                             job_label = match &request {
                                 jobs::Request::Semantic(p) => crate::localize!("正在解析 {p} 的调用", "Resolving calls in {p}", p = p),
+                                jobs::Request::Explanation => crate::localize!("Codex 正在阅读源码并解释项目主线", "Codex is reading source and explaining the project flow").into(),
                                 _ => crate::localize!("正在比较变更", "Comparing changes").into(),
                             };
                             started = Instant::now();
@@ -432,7 +436,7 @@ fn handle_key(browser: &mut Browser<'_>, key: KeyEvent) -> Result<Option<jobs::R
                     String::new(),
                     crate::localize!("源码与分析结果来自固定快照；重新打开项目会更新结构。", "Source and analysis use a pinned snapshot; reopening updates the structure.").into(),
                     crate::localize!("未解析 / 接口关系都不是确定的完整运行时路径。", "Unresolved and interface relations do not establish complete runtime paths.").into(),
-                    crate::localize!("不执行待分析项目的构建脚本；不上传代码。", "Project build scripts are not executed; source code is not uploaded.").into(),
+                    crate::localize!("结构分析在本地运行；显式生成解释时由本机 Codex 使用其模型服务读取快照素材。", "Structural analysis runs locally; explicit explanation generation uses your local Codex and its model service to read snapshot material.").into(),
                 ],
             })?;
         }
@@ -729,6 +733,33 @@ fn line(
 
 // User-controlled source and manifest text must never become terminal commands.
 // Widths are display cells (Chinese characters consume two), not bytes/chars.
+fn wrap_prose_lines(lines: &[String], width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let cells = |value: &str| value.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>();
+    let mut result = Vec::new();
+    for original in lines {
+        for source in original.split('\n') {
+            let mut current = String::new();
+            for c in source.chars().filter(|c| !c.is_control()) {
+                if cells(&current) + c.width().unwrap_or(0) > width {
+                    if let Some(space) = current
+                        .rfind(' ')
+                        .filter(|space| cells(&current[..*space]) >= width / 2)
+                    {
+                        result.push(current[..space].to_owned());
+                        current = current[space + 1..].to_owned();
+                    } else {
+                        result.push(std::mem::take(&mut current));
+                    }
+                }
+                current.push(c);
+            }
+            result.push(current);
+        }
+    }
+    result
+}
+
 fn visible_breadcrumb(text: &str, width: usize) -> String {
     let text = clip(text, usize::MAX, 0);
     let cells = |value: &str| value.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>();

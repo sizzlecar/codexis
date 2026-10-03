@@ -388,3 +388,41 @@ fn chinese_and_english_workbenches_link_objects_source_and_knowledge_history() {
         interrupted.finish("\u{3}");
     }
 }
+
+#[test]
+#[ignore = "requires CODEXIS_BASELINE_ROOT and CODEXIS_BASELINE_CACHE containing a generated Chinese explanation"]
+fn generated_baseline_leads_from_business_steps_to_snapshot_source() {
+    let project = std::env::var_os("CODEXIS_BASELINE_ROOT").expect("set CODEXIS_BASELINE_ROOT");
+    let cache = std::env::var_os("CODEXIS_BASELINE_CACHE").expect("set CODEXIS_BASELINE_CACHE");
+    let project = Path::new(&project);
+    let cache = Path::new(&cache);
+    let output = Command::new(env!("CARGO_BIN_EXE_codexis"))
+        .arg("--project")
+        .arg(project)
+        .arg("--cache-dir")
+        .arg(cache)
+        .args(["baseline", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["data"]["baseline"]["status"], "interpreted");
+    let explanation = &report["data"]["baseline"]["explanation"];
+    assert!((3..=5).contains(&explanation["scenario"]["steps"].as_array().unwrap().len()));
+    assert!(!explanation["purpose"]["evidence"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let mut session = TerminalSession::launch(project, cache, "zh-CN");
+    session.wait_for(0, &["项目概览", "q 退出"]);
+    session.keys("\r", &["项目如何工作", "代表场景", "关键状态", "重要边界"]);
+    session.keys("\r", &["负责什么", "交付什么", "证据 1"]);
+    session.keys("\r", &["源码 ·", "q 退出"]);
+    session.keys("b", &["负责什么", "证据 1"]);
+    session.keys("b", &["项目如何工作", "代表场景"]);
+    session.finish("q");
+}

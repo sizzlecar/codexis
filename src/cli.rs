@@ -182,6 +182,15 @@ impl AnalysisOptions {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Read a saved business baseline or generate one by reading snapshot source with local Codex.
+    Baseline {
+        #[arg(long)]
+        generate: bool,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=3600))]
+        timeout_secs: u64,
+    },
     /// Explore the eight dimensions of project understanding in a stored snapshot.
     Understand {
         #[arg(long, value_enum, default_value = "all")]
@@ -350,6 +359,7 @@ fn localized_command(mut command: clap::Command) -> clap::Command {
     let about = match name.as_str() {
         "codexis" => crate::localize!("基于源码证据理解大型项目、核查改动", "Understand large projects and review changes with source evidence"),
         "analyze" => crate::localize!("读取项目源码、更新索引并生成项目总览", "Capture source, update the index and generate a project overview"),
+        "baseline" => crate::localize!("阅读项目业务认知基线；可调用本机 Codex 阅读源码生成解释", "Read the project's business baseline; optionally use local Codex to read source and explain it"),
         "understand" => crate::localize!("从八个维度探索已保存的项目快照", "Explore the eight dimensions of project understanding in a stored snapshot"),
         "map" => crate::localize!("查看包或模块的结构", "Query package or module structure in a stored snapshot"),
         "inspect" => crate::localize!("查找符号并核查已保存的源码证据", "Find a symbol and inspect stored source evidence"),
@@ -406,6 +416,9 @@ fn localized_command(mut command: clap::Command) -> clap::Command {
             "no_default_features" => crate::localize!("禁用 Rust 默认 feature", "Disable default Rust features"),
             "semantic_timeout_secs" => crate::localize!("语义分析时间预算（秒）", "Semantic analysis time budget in seconds"),
             "semantic_request_limit" => crate::localize!("语义分析查询数量预算", "Semantic analysis request budget"),
+            "generate" => crate::localize!("调用本机 Codex 阅读快照源码并保存业务解释", "Use local Codex to read snapshot source and save a business explanation"),
+            "model" => crate::localize!("生成解释使用的 Codex 模型", "Codex model used to generate the explanation"),
+            "timeout_secs" => crate::localize!("生成解释的时间预算（秒）", "Explanation generation time budget in seconds"),
             "dimension" => crate::localize!("项目理解维度", "Dimension of project understanding"),
             "query" => crate::localize!("符号名、符号 ID 或文件路径", "Symbol name, symbol ID or file path"),
             "claim" => crate::localize!("开发者确认的结论或疑问（原文保存）", "Human conclusion or question, stored verbatim"),
@@ -641,6 +654,17 @@ fn execute(cli: &Cli) -> Result<(Report<Value>, i32)> {
     let mut snapshot = index.snapshot(cli.snapshot.as_deref())?;
     query::check_freshness(&index, &mut snapshot)?;
     let report = match &cli.command {
+        Command::Baseline {
+            generate,
+            model,
+            timeout_secs,
+        } => crate::interpretation::report(
+            &index,
+            &snapshot,
+            *generate,
+            model.as_deref(),
+            *timeout_secs,
+        )?,
         Command::Understand { dimension, scope } => {
             query::understand(&index, &snapshot, dimension.id(), scope.as_deref())?
         }

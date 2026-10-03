@@ -16,6 +16,7 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub(super) enum Request {
+    Explanation,
     Semantic(String),
     Review {
         base: String,
@@ -30,6 +31,7 @@ pub(super) enum Request {
 }
 
 pub(super) enum Completed {
+    Explanation(Box<Value>),
     Semantic {
         package: String,
         snapshot: Box<Snapshot>,
@@ -100,6 +102,14 @@ fn perform(
     let root = PathBuf::from(&base.project_root);
     let mut index = Index::open(&root, cache.as_deref())?;
     match request {
+        Request::Explanation => {
+            let mut current = base;
+            crate::query::check_freshness(&index, &mut current)?;
+            let report = crate::interpretation::report(&index, &current, true, None, 300)?;
+            Ok(Completed::Explanation(Box::new(
+                report.data["baseline"].clone(),
+            )))
+        }
         Request::Semantic(package) => {
             let source = WorkingTreeSource { root }.snapshot()?;
             if source.files.len() != hashes.len()

@@ -11,6 +11,7 @@ macro_rules! line {
 fn label(value: &str) -> &str {
     match value {
         "overview" => crate::localize!("项目概览", "Project overview"),
+        "baseline" => crate::localize!("业务认知基线", "Business understanding baseline"),
         "understanding" => {
             crate::localize!("八维项目理解", "Eight dimensions of project understanding")
         }
@@ -52,6 +53,9 @@ fn label(value: &str) -> &str {
         "writes" => crate::localize!("写入", "writes"),
         "type_usage" => crate::localize!("类型引用", "type usage"),
         "user_confirmed" => crate::localize!("开发者确认", "Human confirmation"),
+        "source" => crate::localize!("源码事实", "Source fact"),
+        "declared" => crate::localize!("文档声明", "Documented declaration"),
+        "interpretation" => crate::localize!("解释", "Interpretation"),
         "high" => crate::localize!("高", "high"),
         "medium" => crate::localize!("中", "medium"),
         "low" => crate::localize!("低", "low"),
@@ -81,6 +85,153 @@ fn field(value: &Value, name: &str) -> String {
 fn location(node: &Value) -> String {
     let evidence = &node["evidence"];
     format!("{}:{}", field(evidence, "path"), evidence["start_line"])
+}
+
+fn baseline_evidence(out: &mut String, value: &Value) -> anyhow::Result<()> {
+    for evidence in value["evidence"].as_array().into_iter().flatten() {
+        let path = field(evidence, "path");
+        let start = evidence["start_line"].as_u64().unwrap_or(0);
+        let end = evidence["end_line"].as_u64().unwrap_or(start);
+        if end > start {
+            writeln!(out, "    {path}:{start}-{end}")?;
+        } else {
+            writeln!(out, "    {path}:{start}")?;
+        }
+    }
+    Ok(())
+}
+
+fn baseline_claim(out: &mut String, title: &str, claim: &Value) -> anyhow::Result<()> {
+    line!(out, "  {}：{}", "  {}: {}", title, field(claim, "text"))?;
+    line!(
+        out,
+        "    依据：{}",
+        "    Basis: {}",
+        label(claim["basis"].as_str().unwrap_or_default())
+    )?;
+    baseline_evidence(out, claim)
+}
+
+pub(crate) fn baseline_text(out: &mut String, baseline: &Value) -> anyhow::Result<()> {
+    line!(out, "\n业务认知基线", "\nBusiness understanding baseline")?;
+    if let Some(explanation) = baseline
+        .get("explanation")
+        .filter(|value| value.is_object())
+    {
+        let notice = field(baseline, "interpretation_notice");
+        if !notice.is_empty() {
+            writeln!(out, "{notice}")?;
+        } else {
+            line!(
+                out,
+                "这是模型对固定快照的解释；引用可核查，不等同人工确认或运行验证。",
+                "This is a model interpretation of a fixed snapshot. Citations can be inspected; they do not imply human confirmation or runtime verification."
+            )?;
+        }
+        baseline_claim(
+            out,
+            crate::localize!("项目目的", "Project purpose"),
+            &explanation["purpose"],
+        )?;
+        line!(out, "\n核心场景", "\nCore scenario")?;
+        let scenario = &explanation["scenario"];
+        baseline_claim(out, crate::localize!("目标", "Goal"), &scenario["goal"])?;
+        baseline_claim(out, crate::localize!("输入", "Input"), &scenario["input"])?;
+        baseline_claim(out, crate::localize!("输出", "Output"), &scenario["output"])?;
+        for (position, step) in scenario["steps"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .take(5)
+            .enumerate()
+        {
+            line!(out, "\n步骤 {}", "\nStep {}", position + 1)?;
+            baseline_claim(out, crate::localize!("环节", "Action"), &step["title"])?;
+            baseline_claim(out, crate::localize!("输入", "Input"), &step["input"])?;
+            baseline_claim(out, crate::localize!("输出", "Output"), &step["output"])?;
+            baseline_claim(
+                out,
+                crate::localize!("职责", "Responsibility"),
+                &step["responsibility"],
+            )?;
+        }
+        line!(out, "\n状态与边界", "\nState and boundary")?;
+        baseline_claim(
+            out,
+            crate::localize!("关键状态", "Key state"),
+            &explanation["key_state"],
+        )?;
+        baseline_claim(
+            out,
+            crate::localize!("边界", "Boundary"),
+            &explanation["boundary"],
+        )?;
+        line!(out, "\n下一步阅读", "\nNext reading")?;
+        baseline_claim(
+            out,
+            crate::localize!("阅读目标", "Reading target"),
+            &explanation["reading"]["target"],
+        )?;
+        baseline_claim(
+            out,
+            crate::localize!("阅读原因", "Why read it"),
+            &explanation["reading"]["why"],
+        )?;
+        if explanation["questions"]
+            .as_array()
+            .is_some_and(|questions| !questions.is_empty())
+        {
+            line!(out, "\n待回答问题", "\nOpen questions")?;
+            for question in explanation["questions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .take(2)
+            {
+                baseline_claim(out, crate::localize!("问题", "Question"), question)?;
+            }
+        }
+    } else {
+        line!(
+            out,
+            "尚未形成业务认知基线。",
+            "A business understanding baseline has not been established."
+        )?;
+        let purpose = &baseline["purpose"];
+        let original = field(purpose, "text");
+        if original.is_empty() {
+            line!(
+                out,
+                "快照中尚未找到文档目的声明。",
+                "No documented purpose statement was found in the snapshot."
+            )?;
+        } else {
+            line!(out, "\n文档目的原文：", "\nOriginal documented purpose:")?;
+            writeln!(out, "{original}")?;
+            line!(out, "  依据：{}", "  Basis: {}", label("declared"))?;
+            baseline_evidence(out, purpose)?;
+        }
+        line!(out, "\n待回答问题", "\nOpen questions")?;
+        for question in baseline["questions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .take(2)
+        {
+            writeln!(out, "  - {}", field(question, "question"))?;
+            let why = field(question, "why");
+            if !why.is_empty() {
+                line!(out, "    原因：{}", "    Why: {}", why)?;
+            }
+            baseline_evidence(out, question)?;
+        }
+        line!(
+            out,
+            "\n生成业务解释：codexis baseline --generate",
+            "\nGenerate a business explanation: codexis baseline --generate"
+        )?;
+    }
+    Ok(())
 }
 
 pub fn render(report: &Report<Value>, format: &str) -> anyhow::Result<String> {
@@ -114,6 +265,27 @@ pub fn render_with_detail(
     }
     if !verbose && report.data["kind"] == "overview" {
         return compact_overview(report);
+    }
+    if report.data["kind"] == "baseline" {
+        let mut out = String::new();
+        line!(
+            out,
+            "Codexis — 业务认知基线",
+            "Codexis — Business understanding baseline"
+        )?;
+        line!(out, "快照：{}", "Snapshot: {}", report.snapshot_id)?;
+        if report.completeness.stale {
+            line!(
+                out,
+                "源码已变化，以下解释对应已保存快照。",
+                "Source changed; the explanation below refers to the stored snapshot."
+            )?;
+        }
+        baseline_text(
+            &mut out,
+            report.data.get("baseline").unwrap_or(&report.data),
+        )?;
+        return Ok(out);
     }
     if report.data["kind"] == "understanding" {
         return understanding_text(report);
@@ -149,6 +321,9 @@ pub fn render_with_detail(
     let data = &report.data;
     match data["kind"].as_str().unwrap_or("") {
         "overview" => {
+            if !data["baseline"].is_null() {
+                baseline_text(&mut out, &data["baseline"])?;
+            }
             let stats = &data["stats"];
             line!(
                 out,
@@ -723,6 +898,13 @@ fn markdown_report(report: &Report<Value>) -> anyhow::Result<String> {
     line!(out,"\n源码链接用于位置导航；核查结论时应使用记录的快照与内容标识。","\nSource links help navigate locations; verify conclusions against the recorded snapshot and content hashes.")?;
     match report.data["kind"].as_str().unwrap_or_default() {
         "overview" | "understanding" => {
+            if report.data["kind"] == "overview" && !report.data["baseline"].is_null() {
+                let mut plain = String::new();
+                baseline_text(&mut plain, &report.data["baseline"])?;
+                let longest = plain.split(|c| c != '~').map(str::len).max().unwrap_or(0);
+                let fence = "~".repeat(3.max(longest.saturating_add(1)));
+                writeln!(out, "\n{fence}text\n{plain}{fence}")?;
+            }
             for dimension in report.data["understanding"]["dimensions"]
                 .as_array()
                 .into_iter()
@@ -860,6 +1042,9 @@ fn compact_overview(report: &Report<Value>) -> anyhow::Result<String> {
             "注意：源码已变化，以下是旧快照。",
             "Source changed; the results below refer to a stored snapshot."
         )?;
+    }
+    if !data["baseline"].is_null() {
+        baseline_text(&mut out, &data["baseline"])?;
     }
     line!(
         out,

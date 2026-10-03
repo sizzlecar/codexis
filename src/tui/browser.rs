@@ -202,6 +202,7 @@ pub(super) struct Browser<'a> {
     pub index: &'a Index,
     pub snapshot: Snapshot,
     guide: Value,
+    baseline: Value,
     understanding: Value,
     review: Option<Arc<Report<Value>>>,
     hashes: BTreeMap<String, String>,
@@ -219,10 +220,12 @@ impl<'a> Browser<'a> {
     pub fn new(index: &'a Index, snapshot: Snapshot, guide: Value) -> Result<Self> {
         let hashes = index.file_hashes(&snapshot.id)?;
         let understanding = query::understanding_data(index, &snapshot)?;
+        let baseline = crate::interpretation::data(index, &snapshot, &understanding, &guide)?;
         let mut browser = Self {
             index,
             snapshot,
             guide,
+            baseline,
             understanding,
             review: None,
             hashes,
@@ -485,6 +488,11 @@ impl<'a> Browser<'a> {
 
     pub fn completed(&mut self, result: Completed) -> Result<()> {
         match result {
+            Completed::Explanation(baseline) => {
+                self.baseline = *baseline;
+                self.status = crate::localize!("项目解释已生成；Enter 沿协作步骤核查源码。", "Project explanation generated; Enter follows a collaboration step to source evidence.").into();
+                self.open(Action::Baseline)?;
+            }
             Completed::Semantic { package, snapshot } => {
                 self.understanding = query::understanding_data(self.index, &snapshot)?;
                 self.status = crate::localize!(
@@ -556,6 +564,124 @@ impl<'a> Browser<'a> {
             }
         }
         Ok(None)
+    }
+
+    fn baseline_page(&self, page: &mut Page) -> Result<()> {
+        let explanation = &self.baseline["explanation"];
+        if explanation.is_object() {
+            page.title = crate::localize!(
+                "项目如何工作 · 认知基线",
+                "How the project works · Baseline"
+            )
+            .into();
+            page.intro = vec![
+                crate::localize!("项目目的：{}", "Purpose: {}", claim_text(&explanation["purpose"])),
+                crate::localize!("代表场景：{}", "Representative scenario: {}", claim_text(&explanation["scenario"]["goal"])),
+                crate::localize!("关键状态：{}", "Key state: {}", claim_text(&explanation["key_state"])),
+                crate::localize!("重要边界：{}", "Important boundary: {}", claim_text(&explanation["boundary"])),
+                crate::localize!("选择步骤并 Enter 核查输入、输出、职责和原文证据。以下是模型解释，尚未经人工确认。", "Select a step and Enter to inspect inputs, outputs, responsibilities and source evidence. This model interpretation is not yet human-confirmed.").into(),
+            ];
+            for (position, step) in array(&explanation["scenario"]["steps"]).iter().enumerate() {
+                let title = format!("{}. {}", position + 1, claim_text(&step["title"]));
+                let summary = format!(
+                    "{}\n{}\n{}",
+                    claim_line(crate::localize!("输入", "Input"), &step["input"]),
+                    claim_line(
+                        crate::localize!("负责什么", "Responsibility"),
+                        &step["responsibility"]
+                    ),
+                    claim_line(crate::localize!("交付什么", "Output"), &step["output"])
+                );
+                page.items
+                    .push(explanation_item(&title, &summary, step, "behavior"));
+            }
+            for (title, value, dimension) in [
+                (
+                    crate::localize!("核心状态与所有权", "Key state and ownership"),
+                    &explanation["key_state"],
+                    "data",
+                ),
+                (
+                    crate::localize!("失败与协作边界", "Failure and collaboration boundary"),
+                    &explanation["boundary"],
+                    "architecture",
+                ),
+            ] {
+                page.items.push(explanation_item(
+                    title,
+                    &claim_line(title, value),
+                    value,
+                    dimension,
+                ));
+            }
+            let reading = &explanation["reading"];
+            page.items.push(explanation_item(
+                crate::localize!("先读哪里，为什么", "Where to read first, and why"),
+                &format!(
+                    "{}\n{}",
+                    claim_line(crate::localize!("先读", "Read first"), &reading["target"]),
+                    claim_line(crate::localize!("理由", "Why"), &reading["why"])
+                ),
+                reading,
+                "knowledge",
+            ));
+            for question in array(&explanation["questions"]) {
+                page.items.push(explanation_item(
+                    crate::localize!("尚未证实的问题", "Unconfirmed question"),
+                    &claim_line(crate::localize!("待核实", "To verify"), question),
+                    question,
+                    "verification",
+                ));
+            }
+        } else {
+            page.title =
+                crate::localize!("业务认知基线尚未形成", "Business baseline not yet formed").into();
+            page.intro = vec![
+                crate::localize!("现有索引定位了声明和源码，还没有解释一个真实场景如何从输入走到结果。", "The index locates declarations and source, but does not yet explain how a real scenario transforms input into a result.").into(),
+                crate::localize!("项目声明：{}", "Project declaration: {}", self.baseline["purpose"]["text"].as_str().unwrap_or(crate::localize!("尚缺目的声明", "Purpose declaration missing"))),
+                crate::localize!("生成解释将让本机 Codex 阅读固定快照源码，梳理协作步骤、核心状态、边界和先读理由。", "Generate an explanation with your local Codex, reading snapshot source to identify collaboration, state, boundaries and reading priorities.").into(),
+            ];
+            page.items.push(Item::new(
+                crate::localize!(
+                    "用 Codex 生成项目解释",
+                    "Generate a project explanation with Codex"
+                ),
+                crate::localize!(
+                    "目的 → 真实场景 → 状态与边界 → 阅读理由",
+                    "Purpose → Real scenario → State and boundaries → Reading rationale"
+                ),
+                Action::Job(Request::Explanation),
+            ));
+            for reading in array(&self.baseline["reading"]).iter().take(3) {
+                let mut value = reading.clone();
+                value["summary"] = value["why"].clone();
+                page.items.push(Item::aggregate(&value, "intent"));
+            }
+            for question in array(&self.baseline["questions"]).iter().take(2) {
+                page.intro.push(crate::localize!(
+                    "待解释：{}",
+                    "To explain: {}",
+                    s(&question["question"])
+                ));
+            }
+        }
+        page.items.push(Item::new(
+            crate::localize!("查看结构与构建包", "Inspect structure and build packages"),
+            crate::localize!(
+                "在理解主线时查阅结构证据",
+                "Consult structural evidence while understanding the main flow"
+            ),
+            Action::Packages,
+        ));
+        Ok(())
+    }
+
+    pub fn wraps_prose(&self) -> bool {
+        match &self.page.action {
+            Action::Baseline => true,
+            Action::Aggregate { value, .. } => value["entry_kind"] == "model_explanation",
+            _ => false,
+        }
     }
 
     fn architecture_lines(&self, component: Option<&str>) -> Vec<String> {
@@ -945,20 +1071,24 @@ impl<'a> Browser<'a> {
                     ),
                     Action::Baseline,
                 );
-                for component in array(&self.understanding["architecture"]["components"])
-                    .iter()
-                    .take(16)
-                {
-                    baseline.detail.push(format!(
-                        "{} · {}",
-                        s(&component["title"]),
-                        s(&component["summary"])
+                baseline.detail.push(
+                    self.baseline["explanation"]["purpose"]["text"]
+                        .as_str()
+                        .or_else(|| self.baseline["purpose"]["text"].as_str())
+                        .unwrap_or(crate::localize!(
+                            "项目目的仍需结合源码解释。",
+                            "The project purpose still needs source-backed interpretation."
+                        ))
+                        .into(),
+                );
+                if self.baseline["explanation"].is_object() {
+                    baseline.detail.push(crate::localize!(
+                        "代表场景：{}",
+                        "Representative scenario: {}",
+                        s(&self.baseline["explanation"]["scenario"]["goal"]["text"])
                     ));
-                }
-                for package in array(&self.guide["packages"]) {
-                    if let Some(description) = package["description"]["text"].as_str() {
-                        baseline.detail.push(description.into());
-                    }
+                } else {
+                    baseline.detail.push(crate::localize!("尚未形成业务认知基线。结构索引只能提供阅读证据。", "No business baseline has been formed. The structural index provides reading evidence.").into());
                 }
                 page.items = vec![
                     baseline,
@@ -1030,38 +1160,7 @@ impl<'a> Browser<'a> {
                 ];
             }
             Action::Baseline => {
-                page.title = crate::localize!("项目认知基线", "Project baseline").into();
-                page.intro =
-                    vec![crate::localize!("按源码模块聚合子系统；职责引用文档，结构数量保留事实来源。", "Subsystems follow source modules; responsibilities quote documentation, with structural facts kept explicit.").into()];
-                for component in array(&self.understanding["architecture"]["components"]) {
-                    page.items.push(Item::aggregate(component, "architecture"));
-                }
-                page.intro.extend(self.architecture_lines(None));
-                if self.understanding["architecture"]["truncated"] == true {
-                    page.intro.push(
-                        crate::localize!(
-                            "子系统列表已截断；可进入构建包与文件继续阅读。",
-                            "Subsystem list truncated; continue through build packages and files."
-                        )
-                        .into(),
-                    );
-                }
-                page.items.push(Item::new(
-                    crate::localize!("项目声明与文档", "Project declarations and documentation"),
-                    crate::localize!(
-                        "能力、目的和模块职责证据",
-                        "Evidence for capabilities, intent and module responsibilities"
-                    ),
-                    Action::Dimension("intent".into()),
-                ));
-                page.items.push(Item::new(
-                    crate::localize!("构建包与文件", "Build packages and files"),
-                    crate::localize!(
-                        "进一步浏览完整定义",
-                        "Browse the complete set of definitions"
-                    ),
-                    Action::Packages,
-                ));
+                self.baseline_page(&mut page)?;
             }
             Action::Dimensions => {
                 page.title = crate::localize!("八维视角", "Eight perspectives").into();
@@ -2293,6 +2392,17 @@ impl<'a> Browser<'a> {
                 self.detail.extend(self.source_lines(evidence, false)?);
             }
         }
+        if self.wraps_prose() {
+            let (width, _) = crossterm::terminal::size().unwrap_or((100, 28));
+            let left = if width < 100 || self.page.items.is_empty() {
+                0
+            } else {
+                (width * 2 / 5).min(52)
+            };
+            self.detail =
+                super::wrap_prose_lines(&self.detail, usize::from(width.saturating_sub(left + 2)));
+            self.page.scroll = self.page.scroll.min(self.detail.len().saturating_sub(1));
+        }
         Ok(())
     }
 
@@ -2327,6 +2437,64 @@ impl<'a> Browser<'a> {
 fn s(value: &Value) -> &str {
     value.as_str().unwrap_or("")
 }
+fn claim_text(value: &Value) -> &str {
+    s(&value["text"])
+}
+
+fn claim_line(label: &str, claim: &Value) -> String {
+    let basis = match s(&claim["basis"]) {
+        "source" => crate::localize!("源码", "Source"),
+        "declared" => crate::localize!("声明", "Declared"),
+        _ => crate::localize!("解释", "Interpretation"),
+    };
+    format!("{label} [{basis}]：{}", claim_text(claim))
+}
+
+fn explanation_item(title: &str, summary: &str, value: &Value, dimension: &str) -> Item {
+    fn collect(value: &Value, evidence: &mut Vec<Evidence>, nodes: &mut BTreeSet<String>) {
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    collect(item, evidence, nodes);
+                }
+            }
+            Value::Object(fields) => {
+                evidence.extend(evidence_values(value));
+                nodes.extend(
+                    array(&value["node_ids"])
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned),
+                );
+                for (key, field) in fields {
+                    if key != "evidence" && key != "node_ids" {
+                        collect(field, evidence, nodes);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut evidence = Vec::new();
+    let mut nodes = BTreeSet::new();
+    collect(value, &mut evidence, &mut nodes);
+    let mut seen = BTreeSet::new();
+    evidence.retain(|e| {
+        seen.insert((
+            e.path.clone(),
+            e.content_hash.clone(),
+            e.start_byte,
+            e.end_byte,
+        ))
+    });
+    let value = serde_json::json!({"title":title,"summary":summary,"entry_kind":"model_explanation", "basis":crate::localize!("模型解释，待人工核查", "Model interpretation, pending human review"), "evidence":evidence,"node_ids":nodes,"paths":evidence.iter().map(|e|&e.path).collect::<Vec<_>>()});
+    let mut item = Item::aggregate(&value, dimension);
+    // The first screen explains the collaboration; source remains one Enter
+    // away rather than displacing the explanation with a code preview.
+    item.evidence = None;
+    item
+}
+
 fn array(value: &Value) -> &[Value] {
     value.as_array().map(Vec::as_slice).unwrap_or(&[])
 }

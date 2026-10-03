@@ -16,6 +16,18 @@ target/release/codexis --locale en analyze /path/to/project
 
 Use the workbench to explore intent, architecture, behavior, data, runtime configuration, changes, verification, and knowledge. Select an object and keep it in context while switching views.
 
+认知基线以一个具体业务场景解释项目目的、协作步骤、关键状态、失败边界和首读理由。首次进入时，选择“用 Codex 生成项目解释”；只有结构索引时会明确提示基线尚未形成。每一步都可打开固定快照中的源码证据。
+
+The baseline explains one concrete scenario: purpose, collaborating steps, state ownership, failure boundaries, and where to read first. Choose **Generate a project explanation with Codex** in the workbench, or run:
+
+```sh
+codexis --project /path/to/project baseline --generate --timeout-secs 300
+codexis --project /path/to/project baseline
+codexis --locale en --project /path/to/project baseline --generate
+```
+
+Explanation generation uses an installed, authenticated `codex` CLI and its model service, explicitly on request. `--model` selects a model; `CODEXIS_CODEX_BIN` selects the executable. Codex reads an isolated copy of admitted source, README, and manifests from the stored snapshot. Runtime data, credentials configuration, planning documents, and project instructions are excluded. Explanations retain source/declaration/interpretation labels and line citations, remain separate from human-confirmed knowledge, and are cached by snapshot, locale, provider and context. Generation can take a few minutes; cancel or timeout preserves the previous valid result.
+
 `↑↓` / `j k` 选择，Enter 进入，`b` 返回，`g` 回主页，`/` 搜索，`o` 看固定快照源码。`d` 打开维度，`1–8` 切换，`x` 清除筛选，`p` 输入当前问题，`c/v` 保存结论或疑问，`h` 查看认知历史，`q` 退出，`?` 查看帮助。宽终端左右布局，窄终端上下布局。
 
 `--locale zh-CN|en` controls system text, with Chinese as the default. `CODEXIS_LOCALE` provides an environment default. Source, documentation excerpts, and user notes retain their original language. Pipes, redirects, `--plain`, and exports use noninteractive reports.
@@ -56,7 +68,7 @@ Python supports pyproject, static configuration, requirements, src layouts, name
 
 文档、配置、SQL、proto、部署与 CI 文件作为固定证据采集。扫描遵循忽略规则，不跟随符号链接，跳过构建与依赖目录。缓存写用户缓存目录或 `--cache-dir`，待分析项目保持只读。混合根目录需指定 `--language rust|python`，暂不构造跨语言调用图。
 
-Findings use stored source, declarations, and indexed relationships. Static calls are not runtime order, types are not complete dataflow, and related tests do not prove coverage or successful execution. Missing responsibilities remain unknown. Model-generated explanations are not connected yet.
+Findings use stored source, declarations, and indexed relationships. Static calls are not runtime order, types are not complete dataflow, and related tests do not prove coverage or successful execution. Missing responsibilities remain unknown until supported by evidence; model explanations remain interpretations for review.
 
 Dimension lists show up to 100 items and expose totals and truncation. Use `--scope` to focus on a component, path, or symbol before this limit is applied. Cold analysis materializes the full graph and can use substantial memory and disk space on million-line projects; cached queries reuse the stored snapshot.
 

@@ -226,12 +226,13 @@ pub fn overview(index: &Index, snapshot: &Snapshot) -> Result<Report<Value>> {
     let entry_points_total = entries.len();
     let reading_guide = guide::build(index, snapshot, &entries)?;
     let understanding = understanding_data(index, snapshot)?;
+    let baseline = crate::interpretation::data(index, snapshot, &understanding, &reading_guide)?;
     entries.truncate(30);
     let mut report = Report::new(
         snapshot,
         json!({
             "kind": "overview", "project": snapshot.project, "stats": snapshot.stats,
-            "project_root":snapshot.project_root, "reading_guide":reading_guide,"understanding":understanding,
+            "project_root":snapshot.project_root, "reading_guide":reading_guide,"understanding":understanding,"baseline":baseline,
             "source_revision": snapshot.source_revision, "entries": entries,"entry_points_total":entry_points_total,"entry_points_limit":30,
             "source_accounting": {
                 "indexed_source_files":snapshot.stats.source_files,
