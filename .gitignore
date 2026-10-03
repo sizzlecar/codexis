@@ -1,0 +1,9 @@
+/target/
+/.codexis/
+*.db-shm
+*.db-wal
+.DS_Store
+.env
+.env.*
+!.env.example
+/.local/

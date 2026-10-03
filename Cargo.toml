@@ -1,0 +1,33 @@
+[package]
+name = "codexis"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Evidence-backed understanding and review of large Rust and Python projects"
+license = "MIT"
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "=4.5.54", features = ["derive"] }
+ctrlc = "3.5"
+crossterm = "=0.29.0"
+directories = "6"
+globset = "0.4"
+ignore = "=0.4.25"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+similar = "=2.7.0"
+toml = "0.8"
+tree-sitter = "=0.26.12"
+tree-sitter-rust = "=0.24.2"
+tree-sitter-python = "=0.25.0"
+url = "2.5"
+unicode-width = "=0.2.2"
+tempfile = "3"
+
+[profile.release]
+lto = "thin"

@@ -1,0 +1,7 @@
+[package]
+name = "browser-smoke"
+version = "0.1.0"
+edition = "2021"
+description = "Small terminal navigation fixture"
+
+[workspace]
