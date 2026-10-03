@@ -12,9 +12,9 @@ target/release/codexis analyze /path/to/project
 target/release/codexis --locale en analyze /path/to/project
 ```
 
-普通终端进入工作台。主页围绕认知基线、改动批次、证据核查和认知更新组织操作。同一对象可在八个维度切换：能力与意图、架构与边界、行为与控制、数据与状态、配置与运行、变更与演进、验证与约束、认知与阅读。
+普通终端进入工作台。首页只保留“理解项目”和“查看改动”，展示一句项目说明。进入“理解项目”后可沿业务步骤阅读源码；“深入分析”提供入口与调用、八维视角、构建包与文件、阅读记录和分析范围。
 
-Use the workbench to explore intent, architecture, behavior, data, runtime configuration, changes, verification, and knowledge. Select an object and keep it in context while switching views.
+The home screen offers **Understand the project** and **Review changes**, with a short project description. Follow business steps into source, or choose **Explore further** for entries, eight perspectives, packages and files, reading notes, and analysis scope. Select an object and keep it in context while switching views.
 
 认知基线以一个具体业务场景解释项目目的、协作步骤、关键状态、失败边界和首读理由。首次进入时，选择“用 Codex 生成项目解释”；只有结构索引时会明确提示基线尚未形成。每一步都可打开固定快照中的源码证据。
 
@@ -28,7 +28,7 @@ codexis --locale en --project /path/to/project baseline --generate
 
 Explanation generation uses an installed, authenticated `codex` CLI and its model service, explicitly on request. `--model` selects a model; `CODEXIS_CODEX_BIN` selects the executable. Codex reads an isolated copy of admitted source, README, and manifests from the stored snapshot. Runtime data, credentials configuration, planning documents, and project instructions are excluded. Explanations retain source/declaration/interpretation labels and line citations, remain separate from human-confirmed knowledge, and are cached by snapshot, locale, provider and context. Generation can take a few minutes; cancel or timeout preserves the previous valid result.
 
-`↑↓` / `j k` 选择，Enter 进入，`b` 返回，`g` 回主页，`/` 搜索，`o` 看固定快照源码。`d` 打开维度，`1–8` 切换，`x` 清除筛选，`p` 输入当前问题，`c/v` 保存结论或疑问，`h` 查看认知历史，`q` 退出，`?` 查看帮助。宽终端左右布局，窄终端上下布局。
+首页用 `↑↓` 选择、Enter 打开、`q` 退出；`?` 查看当前页面的帮助。深入页面保留 `b` 返回、`g` 回主页、`/` 搜索、`o` 看源码、`d` / `1–8` 切换视角、`c/v` 保存结论或疑问等操作，底部只提示当前页面常用按键。深入页面在宽终端左右布局，窄终端上下布局。
 
 `--locale zh-CN|en` controls system text, with Chinese as the default. `CODEXIS_LOCALE` provides an environment default. Source, documentation excerpts, and user notes retain their original language. Pipes, redirects, `--plain`, and exports use noninteractive reports.
 

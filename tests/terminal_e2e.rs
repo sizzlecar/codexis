@@ -111,6 +111,29 @@ impl TerminalSession {
         String::from_utf8_lossy(&self.transcript[start..]).into_owned()
     }
 
+    fn screen_text(&self) -> String {
+        // Each actual redraw clears the screen. Inspect the most recent frame,
+        // so earlier navigation cannot make assertions about Home pass.
+        let text = String::from_utf8_lossy(&self.transcript);
+        let frame = text.rsplit("\u{1b}[2J").next().unwrap();
+        let mut plain = String::new();
+        let mut chars = frame.chars();
+        while let Some(character) = chars.next() {
+            if character == '\u{1b}' {
+                if chars.next() == Some('[') {
+                    for control in chars.by_ref() {
+                        if ('@'..='~').contains(&control) {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                plain.push(character);
+            }
+        }
+        plain
+    }
+
     fn finish(mut self, quit: &str) -> String {
         self.input
             .as_mut()
@@ -195,6 +218,126 @@ fn write(root: &Path, path: &str, text: &str) {
     fs::write(target, text).unwrap();
 }
 
+fn assert_simple_home(session: &TerminalSession, en: bool) {
+    let screen = session.screen_text();
+    for entry in if en {
+        ["Understand the project", "Review changes"]
+    } else {
+        ["理解项目", "查看改动"]
+    } {
+        assert!(
+            screen.contains(entry),
+            "Home is missing its task {entry:?}: {screen}"
+        );
+    }
+    for hidden in [
+        "阅读记录",
+        "Reading notes",
+        "入口与调用",
+        "Entries and calls",
+        "八维视角",
+        "Eight perspectives",
+        "构建包与文件",
+        "Build packages and files",
+        "分析范围与状态",
+        "Analysis scope and status",
+        "子系统",
+        "subsystems",
+        "已定位依赖",
+        "established dependency",
+        "Snapshot:",
+        "快照：",
+        "对象：",
+        "Object:",
+        "问题：",
+        "Question:",
+        "先选择对象",
+        "Select an object",
+        "d/1–8",
+        "d 维度",
+        "d Views",
+        "o 源码",
+        "o Source",
+        "/ 搜索",
+        "/ Search",
+        "c 结论",
+        "c Conclusion",
+        "v 疑问",
+        "v Question",
+        "h 历史",
+        "h History",
+        "Terminal workflow fixture",
+        "Executes one task",
+    ] {
+        assert!(!screen.contains(hidden), "Home leaked {hidden:?}: {screen}");
+    }
+    assert!(
+        screen.contains("↑↓") && screen.contains("Enter") && screen.contains('?'),
+        "Home must expose basic navigation and help: {screen}"
+    );
+    assert!(screen.contains(if en { "q Exit" } else { "q 退出" }));
+}
+
+fn open_explore(session: &mut TerminalSession, en: bool) {
+    let quit = if en { "q Exit" } else { "q 退出" };
+    session.keys(
+        "\r",
+        &[
+            if en {
+                "Business baseline not yet formed"
+            } else {
+                "业务认知基线尚未形成"
+            },
+            quit,
+        ],
+    );
+    // Selection clamps at the last item; this route is independent of the
+    // number of source reading candidates in a structural evidence packet.
+    session.keys(
+        &"j".repeat(24),
+        &[
+            if en {
+                "› Explore further"
+            } else {
+                "› 深入分析"
+            },
+            quit,
+        ],
+    );
+    session.keys(
+        "\r",
+        &[
+            if en {
+                "Explore further"
+            } else {
+                "深入分析"
+            },
+            if en {
+                "Entries and calls"
+            } else {
+                "入口与调用"
+            },
+            if en {
+                "Eight perspectives"
+            } else {
+                "八维视角"
+            },
+            if en {
+                "Build packages and files"
+            } else {
+                "构建包与文件"
+            },
+            if en { "Reading notes" } else { "阅读记录" },
+            if en {
+                "Analysis scope and status"
+            } else {
+                "分析范围与状态"
+            },
+            quit,
+        ],
+    );
+}
+
 #[test]
 fn chinese_and_english_workbenches_link_objects_source_and_knowledge_history() {
     for locale in ["zh-CN", "en"] {
@@ -214,9 +357,9 @@ fn chinese_and_english_workbenches_link_objects_source_and_knowledge_history() {
         );
         let en = locale == "en";
         let home = if en {
-            "Knowledge workbench"
+            "Understand the project"
         } else {
-            "项目认知工作台"
+            "理解项目"
         };
         let quit = if en { "q Exit" } else { "q 退出" };
         let dimensions = if en {
@@ -243,10 +386,144 @@ fn chinese_and_english_workbenches_link_objects_source_and_knowledge_history() {
             ]
         };
         let mut session = TerminalSession::launch(project.path(), cache.path(), locale);
-        session.wait_for(0, &[home, quit]);
-        session.keys("d", &dimensions);
+        session.wait_for(
+            0,
+            &[home, if en { "Review changes" } else { "查看改动" }, quit],
+        );
+        assert_simple_home(&session, en);
+        // Down clamps to the second task, then one Up returns to the first.
+        // This verifies the actual menu has exactly two entries even when a
+        // brief introduction repeats a task's name.
+        session.keys(
+            "jjj",
+            &[
+                if en {
+                    "› Review changes"
+                } else {
+                    "› 查看改动"
+                },
+                quit,
+            ],
+        );
+        session.keys(
+            "k",
+            &[
+                if en {
+                    "› Understand the project"
+                } else {
+                    "› 理解项目"
+                },
+                quit,
+            ],
+        );
+        session.keys(
+            "?",
+            &[
+                if en { "Keyboard help" } else { "操作说明" },
+                if en {
+                    "Choose a task"
+                } else {
+                    "选择要做的事"
+                },
+                if en {
+                    "Open the selected task"
+                } else {
+                    "打开所选入口"
+                },
+                quit,
+            ],
+        );
+        let help = session.screen_text();
+        for advanced in [
+            "Switch perspectives",
+            "切换八维视角",
+            "Save a conclusion",
+            "保存认知结论",
+            "View current knowledge record history",
+            "查看当前认知记录历史",
+        ] {
+            assert!(
+                !help.contains(advanced),
+                "Home help should focus on choosing a task: {help}"
+            );
+        }
+        session.keys("b", &[home, quit]);
+        assert_simple_home(&session, en);
+        session.keys(
+            "j\r",
+            &[
+                if en {
+                    "Change batch · Select scope"
+                } else {
+                    "改动批次 · 选择范围"
+                },
+                quit,
+            ],
+        );
+        session.keys("g", &[home, quit]);
+        open_explore(&mut session, en);
+        let explore = if en {
+            "Explore further"
+        } else {
+            "深入分析"
+        };
+        session.keys(
+            "\r",
+            &[
+                if en {
+                    "Entries and calls"
+                } else {
+                    "入口与调用"
+                },
+                "pty_workbench::main",
+                quit,
+            ],
+        );
+        session.keys("b", &[explore, quit]);
+        session.keys(
+            "jj\r",
+            &[
+                if en {
+                    "Modules and dependencies"
+                } else {
+                    "模块与依赖"
+                },
+                "pty-workbench",
+                quit,
+            ],
+        );
+        session.keys("b", &[explore, quit]);
+        session.keys(
+            "j\r",
+            &[
+                if en {
+                    "Knowledge and reading"
+                } else {
+                    "认知与阅读"
+                },
+                quit,
+            ],
+        );
+        session.keys("b", &[explore, quit]);
+        session.keys(
+            "j\r",
+            &[
+                if en {
+                    "Analysis scope and status"
+                } else {
+                    "分析范围与状态"
+                },
+                if en {
+                    "Syntax snapshot:"
+                } else {
+                    "结构快照："
+                },
+                quit,
+            ],
+        );
+        session.keys("b", &[explore, quit]);
+        session.keys("kkk\r", &dimensions);
         for (position, title) in dimensions.iter().enumerate() {
-            session.keys("g", &[home, quit]);
             let active = if position == 5 {
                 if en {
                     "Change batch · Select scope"
@@ -257,8 +534,8 @@ fn chinese_and_english_workbenches_link_objects_source_and_knowledge_history() {
                 title
             };
             session.keys(&(position + 1).to_string(), &[active, quit]);
+            session.keys("b", &dimensions);
         }
-        session.keys("g", &[home, quit]);
         session.keys("2", &[dimensions[1], quit]);
         session.keys(
             "\r",
@@ -352,6 +629,21 @@ fn chinese_and_english_workbenches_link_objects_source_and_knowledge_history() {
                 quit,
             ],
         );
+        session.keys("g", &[home, quit]);
+        assert_simple_home(&session, en);
+        open_explore(&mut session, en);
+        session.keys(
+            "jjj\r",
+            &[
+                if en {
+                    "Knowledge and reading"
+                } else {
+                    "认知与阅读"
+                },
+                "rechecked workbench claim",
+                quit,
+            ],
+        );
         let transcript = session.finish("q");
         assert!(!transcript.contains(if en {
             "Knowledge not saved"
@@ -418,7 +710,7 @@ fn generated_baseline_leads_from_business_steps_to_snapshot_source() {
         .unwrap()
         .is_empty());
     let mut session = TerminalSession::launch(project, cache, "zh-CN");
-    session.wait_for(0, &["项目概览", "q 退出"]);
+    session.wait_for(0, &["理解项目", "查看改动", "q 退出"]);
     session.keys("\r", &["项目如何工作", "代表场景", "关键状态", "重要边界"]);
     session.keys("\r", &["负责什么", "交付什么", "证据 1"]);
     session.keys("\r", &["源码 ·", "q 退出"]);

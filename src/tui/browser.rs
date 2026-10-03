@@ -19,6 +19,7 @@ const PAGE_SIZE: usize = 100;
 pub(super) enum Action {
     Home,
     Baseline,
+    Explore,
     Dimensions,
     Dimension(String),
     Aggregate {
@@ -230,10 +231,7 @@ impl<'a> Browser<'a> {
             review: None,
             hashes,
             semantics: BTreeMap::new(),
-            page: Page::new(
-                Action::Home,
-                crate::localize!("项目概览", "Project overview"),
-            ),
+            page: Page::new(Action::Home, crate::localize!("项目", "Project")),
             history: vec![],
             focus: None,
             question: String::new(),
@@ -253,6 +251,34 @@ impl<'a> Browser<'a> {
             .chain(std::iter::once(self.page.title.as_str()))
             .collect::<Vec<_>>()
             .join(" › ")
+    }
+
+    pub(super) fn home_summary(&self) -> String {
+        if let Some(purpose) = self.baseline["explanation"]["purpose"]["text"]
+            .as_str()
+            .filter(|text| !text.trim().is_empty())
+        {
+            let purpose = purpose.trim();
+            let end = purpose
+                .char_indices()
+                .find_map(|(byte, ch)| {
+                    let end = byte + ch.len_utf8();
+                    let sentence_end = matches!(ch, '。' | '！' | '？')
+                        || (matches!(ch, '.' | '!' | '?')
+                            && purpose[end..]
+                                .chars()
+                                .next()
+                                .is_none_or(char::is_whitespace));
+                    sentence_end.then_some(end)
+                })
+                .unwrap_or(purpose.len());
+            return purpose[..end].into();
+        }
+        crate::localize!(
+            "还没有项目解释，进入「理解项目」开始。",
+            "No project explanation yet. Open ‘Understand the project’ to get started."
+        )
+        .into()
     }
 
     pub fn open(&mut self, action: Action) -> Result<Option<Request>> {
@@ -666,12 +692,12 @@ impl<'a> Browser<'a> {
             }
         }
         page.items.push(Item::new(
-            crate::localize!("查看结构与构建包", "Inspect structure and build packages"),
+            crate::localize!("深入分析", "Explore further"),
             crate::localize!(
-                "在理解主线时查阅结构证据",
-                "Consult structural evidence while understanding the main flow"
+                "沿入口、分析视角或文件继续阅读。",
+                "Continue reading through entries, perspectives, or files."
             ),
-            Action::Packages,
+            Action::Explore,
         ));
         Ok(())
     }
@@ -1050,88 +1076,39 @@ impl<'a> Browser<'a> {
         let mut page = Page::new(action.clone(), "");
         match action {
             Action::Home => {
-                page.title = crate::localize!(
-                    "项目概览 · 认知工作台",
-                    "Project overview · Knowledge workbench"
-                )
-                .into();
-                page.intro = vec![
-                    crate::localize!("建立认知基线 → 理解改动批次 → 沿证据核查 → 更新项目认知。", "Establish a baseline → Understand a change batch → Check evidence → Update knowledge.").into(),
-                    crate::localize!("{} 个子系统 · {} 组已定位依赖 · 八个联动视角", "{} subsystems · {} established dependency groups · Eight linked perspectives",
-                        self.understanding["architecture"]["total"],
-                        self.understanding["architecture"]["dependencies_total"]
-                    ),
-                    crate::localize!("先选择对象，再按 d / 1–8 切换视角；p 保存当前问题，x 回到项目全景。", "Select an object, then d / 1–8 to switch perspectives; p to keep a question, x for the full project.").into(),
-                ];
-                let mut baseline = Item::new(
-                    crate::localize!("建立认知基线", "Establish a baseline"),
-                    crate::localize!(
-                        "项目能力、子系统职责与协作关系",
-                        "Project capabilities, subsystem responsibilities and collaboration"
-                    ),
-                    Action::Baseline,
-                );
-                baseline.detail.push(
-                    self.baseline["explanation"]["purpose"]["text"]
-                        .as_str()
-                        .or_else(|| self.baseline["purpose"]["text"].as_str())
-                        .unwrap_or(crate::localize!(
-                            "项目目的仍需结合源码解释。",
-                            "The project purpose still needs source-backed interpretation."
-                        ))
-                        .into(),
-                );
-                if self.baseline["explanation"].is_object() {
-                    baseline.detail.push(crate::localize!(
-                        "代表场景：{}",
-                        "Representative scenario: {}",
-                        s(&self.baseline["explanation"]["scenario"]["goal"]["text"])
-                    ));
-                } else {
-                    baseline.detail.push(crate::localize!("尚未形成业务认知基线。结构索引只能提供阅读证据。", "No business baseline has been formed. The structural index provides reading evidence.").into());
-                }
+                page.title = crate::localize!("项目", "Project").into();
                 page.items = vec![
-                    baseline,
                     Item::new(
-                        crate::localize!("入口与调用", "Entries and calls"),
+                        crate::localize!("理解项目", "Understand the project"),
                         crate::localize!(
-                            "从程序入口深入场景、路径与未知边界",
-                            "Explore scenarios, paths and unknown boundaries from declared entries"
+                            "了解目的、协作与关键代码。",
+                            "Understand its purpose, collaboration, and key code."
                         ),
-                        Action::Entries,
+                        Action::Baseline,
                     ),
                     Item::new(
-                        crate::localize!("理解改动批次", "Understand a change batch"),
+                        crate::localize!("查看改动", "Review changes"),
                         crate::localize!(
-                            "功能分组、边界变化与前后源码",
-                            "Functional groups, boundary changes and old/new source"
+                            "查看改了什么以及相关源码。",
+                            "Read what changed and its related source."
                         ),
                         self.review
                             .as_ref()
                             .map(|r| Action::Changes(r.clone()))
                             .unwrap_or(Action::ReviewMenu),
                     ),
+                ];
+            }
+            Action::Explore => {
+                page.title = crate::localize!("深入分析", "Explore further").into();
+                page.items = vec![
                     Item::new(
-                        crate::localize!("沿证据核查", "Check the evidence"),
+                        crate::localize!("入口与调用", "Entries and calls"),
                         crate::localize!(
-                            "核查清单、测试关联与关键场景",
-                            "Review checklist, test associations and key scenarios"
+                            "沿入口查看调用路径与未知边界。",
+                            "Follow entry calls and their unknown boundaries."
                         ),
-                        self.review
-                            .as_ref()
-                            .map(|r| Action::BatchSection {
-                                report: r.clone(),
-                                section: "checklist".into(),
-                            })
-                            .unwrap_or(Action::Dimension("verification".into())),
-                    ),
-                    Item::new(
-                        crate::localize!("更新项目认知", "Update project knowledge"),
-                        crate::localize!(
-                            "结论、疑问、需复核记录与历史",
-                            "Conclusions, questions, outdated records and history"
-                        ),
-                        Action::Knowledge { history: None },
+                        Action::Entries,
                     ),
                     Item::new(
                         crate::localize!("八维视角", "Eight perspectives"),
@@ -1148,6 +1125,14 @@ impl<'a> Browser<'a> {
                             "Explore source and manifest dependencies"
                         ),
                         Action::Packages,
+                    ),
+                    Item::new(
+                        crate::localize!("阅读记录", "Reading notes"),
+                        crate::localize!(
+                            "查看保存的结论与疑问。",
+                            "View saved conclusions and questions."
+                        ),
+                        Action::Knowledge { history: None },
                     ),
                     Item::new(
                         crate::localize!("分析范围与状态", "Analysis scope and status"),
@@ -2370,6 +2355,10 @@ impl<'a> Browser<'a> {
     }
 
     pub fn preview(&mut self) -> Result<()> {
+        if matches!(self.page.action, Action::Home) {
+            self.detail.clear();
+            return Ok(());
+        }
         self.detail = self.page.intro.clone();
         if let Some(item) = self.page.items.get(self.page.selected) {
             self.detail.extend([

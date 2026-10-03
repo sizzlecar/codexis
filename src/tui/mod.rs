@@ -417,6 +417,27 @@ fn handle_key(browser: &mut Browser<'_>, key: KeyEvent) -> Result<Option<jobs::R
             }
         }
         KeyCode::Char('?') => {
+            if matches!(browser.page.action, Action::Home) {
+                browser.open(Action::Text {
+                    title: crate::localize!("操作说明", "Keyboard help").into(),
+                    lines: vec![
+                        crate::localize!("↑↓         选择要做的事", "↑↓         Choose a task")
+                            .into(),
+                        crate::localize!(
+                            "Enter      打开所选入口",
+                            "Enter      Open the selected task"
+                        )
+                        .into(),
+                        crate::localize!(
+                            "b / Esc    从这里返回首页",
+                            "b / Esc    Return to the home screen"
+                        )
+                        .into(),
+                        crate::localize!("q          退出", "q          Exit").into(),
+                    ],
+                })?;
+                return Ok(None);
+            }
             browser.open(Action::Text {
                 title: crate::localize!("操作说明", "Keyboard help").into(),
                 lines: vec![
@@ -470,6 +491,11 @@ fn draw(browser: &Browser<'_>, input: Option<&str>, progress: Option<&str>) -> R
         .file_name()
         .unwrap_or_default()
         .to_string_lossy();
+    if matches!(browser.page.action, Action::Home) {
+        draw_home(&mut out, browser, &name, (width, height), input, progress)?;
+        out.flush()?;
+        return Ok(());
+    }
     line(
         &mut out,
         1,
@@ -688,14 +714,7 @@ fn draw(browser: &Browser<'_>, input: Option<&str>, progress: Option<&str>) -> R
         1,
         height - 2,
         width - 2,
-        if width < 100 {
-            crate::localize!(
-                "q 退出  ↑↓ 选择  Enter 展开  d 维度  c 结论  ? 更多",
-                "q Exit  ↑↓ Select  Enter Open  d Views  c Save  ? More"
-            )
-        } else {
-            crate::localize!("↑↓ 选择  Enter 展开  b 返回  d/1–8 维度  / 搜索  o 源码  c 结论  v 疑问  h 历史  g 工作台  q 退出  ? 帮助", "↑↓ Select  Enter Open  b Back  d/1–8 Views  / Search  o Source  c Conclusion  v Question  h History  g Workbench  q Exit  ? Help")
-        },
+        page_shortcuts(browser),
         Color::Cyan,
         false,
         0,
@@ -703,6 +722,142 @@ fn draw(browser: &Browser<'_>, input: Option<&str>, progress: Option<&str>) -> R
     queue!(out, style::ResetColor)?;
     out.flush()?;
     Ok(())
+}
+
+fn draw_home(
+    out: &mut impl Write,
+    browser: &Browser<'_>,
+    name: &str,
+    size: (u16, u16),
+    input: Option<&str>,
+    progress: Option<&str>,
+) -> Result<()> {
+    let (width, height) = size;
+    let block_width = width.saturating_sub(4).min(88);
+    let x = (width - block_width) / 2;
+    let top = height.saturating_sub(16) / 3;
+    line(
+        out,
+        x,
+        top,
+        block_width,
+        &format!("CODEXIS / {name}"),
+        Color::Cyan,
+        true,
+        0,
+    )?;
+    let summary = wrap_prose_lines(&[browser.home_summary()], usize::from(block_width));
+    for (row, text) in summary.iter().take(2).enumerate() {
+        let text = if row == 1 && summary.len() > 2 {
+            format!("{}…", clip(text, usize::from(block_width - 1), 0))
+        } else {
+            text.clone()
+        };
+        line(
+            out,
+            x,
+            top + 2 + row as u16,
+            block_width,
+            &text,
+            Color::Grey,
+            false,
+            0,
+        )?;
+    }
+    for (row, item) in browser.page.items.iter().enumerate() {
+        let selected = row == browser.page.selected;
+        let y = top + 6 + row as u16 * 3;
+        line(
+            out,
+            x,
+            y,
+            block_width,
+            &format!("{} {}", if selected { "›" } else { " " }, item.label),
+            if selected { Color::Cyan } else { Color::White },
+            selected,
+            0,
+        )?;
+        line(
+            out,
+            x + 2,
+            y + 1,
+            block_width - 2,
+            &item.hint,
+            Color::DarkGrey,
+            false,
+            0,
+        )?;
+    }
+    if browser.snapshot.completeness.stale || browser.snapshot.completeness.status != "complete" {
+        let warning = if browser.snapshot.completeness.stale {
+            crate::localize!(
+                "源码已变化，请重新打开项目。",
+                "Source changed; reopen the project."
+            )
+        } else {
+            crate::localize!(
+                "分析尚不完整；进入深入分析查看范围。",
+                "Analysis is partial; inspect scope in Explore further."
+            )
+        };
+        line(
+            out,
+            x,
+            height - 4,
+            block_width,
+            warning,
+            Color::Yellow,
+            false,
+            0,
+        )?;
+    }
+    line(
+        out,
+        x,
+        height - 3,
+        block_width,
+        input.or(progress).unwrap_or(&browser.status),
+        Color::Yellow,
+        false,
+        0,
+    )?;
+    line(
+        out,
+        x,
+        height - 2,
+        block_width,
+        page_shortcuts(browser),
+        Color::DarkGrey,
+        false,
+        0,
+    )?;
+    queue!(out, style::ResetColor)?;
+    Ok(())
+}
+
+fn page_shortcuts(browser: &Browser<'_>) -> &'static str {
+    match browser.page.action {
+        Action::Home => crate::localize!(
+            "↑↓ 选择  Enter 打开  ? 帮助  q 退出",
+            "↑↓ Select  Enter Open  ? Help  q Exit"
+        ),
+        Action::Source(_) | Action::Diff { .. } | Action::Text { .. } => crate::localize!(
+            "↑↓ 滚动  b 返回  ? 帮助  q 退出",
+            "↑↓ Scroll  b Back  ? Help  q Exit"
+        ),
+        Action::KnowledgeRecord(_) => crate::localize!(
+            "c 结论  v 疑问  h 历史  b 返回  ? 帮助  q 退出",
+            "c Claim  v Question  h History  b Back  ? Help  q Exit"
+        ),
+        Action::Node { .. } | Action::Edge { .. } => crate::localize!(
+            "↑↓ 选择  Enter 打开  o 源码  b 返回  ? 帮助  q 退出",
+            "↑↓ Select  Enter Open  o Source  b Back  ? Help  q Exit"
+        ),
+        _ => crate::localize!(
+            "↑↓ 选择  Enter 打开  b 返回  ? 帮助  q 退出",
+            "↑↓ Select  Enter Open  b Back  ? Help  q Exit"
+        ),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

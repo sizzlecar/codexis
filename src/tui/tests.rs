@@ -46,13 +46,12 @@ fn browser(index: &Index, snapshot: Snapshot) -> Browser<'_> {
 fn overview_navigation_keeps_selection_and_hides_debug_data() {
     let (_root, _cache, index, snapshot) = fixture();
     let mut ui = browser(&index, snapshot.clone());
-    assert_eq!(ui.page.items.len(), 8);
-    assert!(ui
-        .detail
-        .iter()
-        .any(|l| l.contains("A source-backed example")));
+    assert_eq!(ui.page.items.len(), 2);
+    assert!(ui.detail.is_empty());
+    assert!(ui.home_summary().contains("理解项目"));
     assert!(!ui.detail.join("\n").contains(&snapshot.id));
     ui.select(1).unwrap();
+    ui.open(Action::Explore).unwrap();
     ui.enter().unwrap();
     assert_eq!(ui.page.title, "入口与调用");
     assert_eq!(ui.page.items.len(), 1, "exclude example/build entry points");
@@ -64,7 +63,9 @@ fn overview_navigation_keeps_selection_and_hides_debug_data() {
     ui.back().unwrap();
     ui.back().unwrap();
     ui.back().unwrap();
-    assert_eq!(ui.page.title, "项目概览 · 认知工作台");
+    assert_eq!(ui.page.title, "深入分析");
+    ui.back().unwrap();
+    assert_eq!(ui.page.title, "项目");
     assert_eq!(ui.page.selected, 1);
 }
 
