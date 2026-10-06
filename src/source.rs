@@ -383,6 +383,38 @@ impl Drop for GitBlobs {
     }
 }
 
+/// The working tree changed while a snapshot was being analyzed.
+#[derive(Debug)]
+pub struct SourceChanged {
+    pub paths: Vec<String>,
+}
+
+impl SourceChanged {
+    /// The first few changed paths, for messages.
+    pub fn summary(&self) -> String {
+        let mut shown: Vec<&str> = self.paths.iter().take(3).map(String::as_str).collect();
+        let more = self.paths.len().saturating_sub(shown.len());
+        let extra;
+        if more > 0 {
+            extra = crate::localize!("等 {} 个文件", "and {} more", more);
+            shown.push(&extra);
+        }
+        shown.join(", ")
+    }
+}
+
+impl std::fmt::Display for SourceChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&crate::localize!(
+            "分析期间项目文件发生变化（{}）；请在这些文件停止修改后重试",
+            "project changed during analysis ({}); retry once these files stop changing",
+            self.summary()
+        ))
+    }
+}
+
+impl std::error::Error for SourceChanged {}
+
 pub fn verify_working_snapshot(source: &SourceSet) -> Result<()> {
     if source.revision.starts_with("worktree:") || source.revision == "directory" {
         let current = WorkingTreeSource {
@@ -390,7 +422,22 @@ pub fn verify_working_snapshot(source: &SourceSet) -> Result<()> {
         }
         .snapshot()?;
         if current.content_id() != source.content_id() {
-            bail!("project changed during analysis; retry to capture a consistent snapshot");
+            let mut paths: Vec<String> = source
+                .files
+                .iter()
+                .filter(|(path, file)| current.files.get(*path).is_none_or(|c| c.hash != file.hash))
+                .map(|(path, _)| path.clone())
+                .collect();
+            paths.extend(
+                current
+                    .files
+                    .keys()
+                    .filter(|path| !source.files.contains_key(*path))
+                    .cloned(),
+            );
+            paths.sort();
+            paths.dedup();
+            return Err(SourceChanged { paths }.into());
         }
     }
     Ok(())
@@ -433,4 +480,26 @@ pub fn materialize(source: &SourceSet, cache_root: &Path) -> Result<SourceSet> {
         files: source.files.clone(),
         diagnostics: source.diagnostics.clone(),
     })
+}
+
+#[cfg(test)]
+mod change_tests {
+    use super::*;
+
+    #[test]
+    fn edits_during_analysis_name_the_changed_files() {
+        let root = tempfile::TempDir::new().unwrap();
+        fs::write(root.path().join("lib.rs"), "pub fn a() {}\n").unwrap();
+        fs::write(root.path().join("NOTES.md"), "draft\n").unwrap();
+        let source = WorkingTreeSource {
+            root: root.path().into(),
+        }
+        .snapshot()
+        .unwrap();
+        verify_working_snapshot(&source).unwrap();
+        fs::write(root.path().join("NOTES.md"), "edited by another tool\n").unwrap();
+        let error = verify_working_snapshot(&source).unwrap_err();
+        let changed = error.downcast_ref::<SourceChanged>().unwrap();
+        assert_eq!(changed.paths, ["NOTES.md"]);
+    }
 }

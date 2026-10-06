@@ -597,6 +597,43 @@ fn report_code(report: &Report<Value>) -> i32 {
     }
 }
 
+/// Analyze the working tree. Files edited during the scan (for example by an
+/// agent writing notes) make the snapshot inconsistent; capture again, which
+/// reuses the syntax cache for unchanged files and is much shorter.
+fn analyze_working(
+    index: &mut Index,
+    root: &std::path::Path,
+    options: &AnalysisOptions,
+    verbose: bool,
+) -> Result<crate::model::Snapshot> {
+    const ATTEMPTS: usize = 3;
+    for attempt in 1..=ATTEMPTS {
+        let source = WorkingTreeSource {
+            root: root.to_path_buf(),
+        }
+        .snapshot()?;
+        match analysis::analyze(index, &source, options.context(&source)?, verbose) {
+            Err(error) if attempt < ATTEMPTS => {
+                let Some(changed) = error.downcast_ref::<crate::source::SourceChanged>() else {
+                    return Err(error);
+                };
+                eprintln!(
+                    "{}",
+                    crate::localize!(
+                        "分析期间 {} 被修改，重新读取（第 {}/{} 次）…",
+                        "{} changed during analysis; capturing again ({}/{})…",
+                        changed.summary(),
+                        attempt + 1,
+                        ATTEMPTS
+                    )
+                );
+            }
+            result => return result,
+        }
+    }
+    unreachable!("the last attempt returns")
+}
+
 fn execute(cli: &Cli) -> Result<(Report<Value>, i32)> {
     if cli.snapshot.is_some()
         && matches!(
@@ -635,9 +672,7 @@ fn execute(cli: &Cli) -> Result<(Report<Value>, i32)> {
         if interactive(cli) {
             eprintln!("{}", crate::localize!("正在读取项目… 首次索引需要几秒，后续会复用缓存。", "Reading project… The first index takes a few seconds; subsequent runs reuse the cache."));
         }
-        let source = WorkingTreeSource { root }.snapshot()?;
-        let snapshot =
-            analysis::analyze(&mut index, &source, options.context(&source)?, cli.verbose)?;
+        let snapshot = analyze_working(&mut index, &root, options, cli.verbose)?;
         let report = query::overview(&index, &snapshot)?;
         let code = report_code(&report);
         return Ok((report, code));
@@ -656,26 +691,28 @@ fn execute(cli: &Cli) -> Result<(Report<Value>, i32)> {
             revision: base.clone(),
         }
         .snapshot()?;
-        let head_source = match head {
-            Some(revision) => GitSource {
-                root: root.clone(),
-                revision: revision.clone(),
-            }
-            .snapshot()?,
-            None => WorkingTreeSource { root: root.clone() }.snapshot()?,
-        };
         let before = analysis::analyze(
             &mut index,
             &base_source,
             options.context(&base_source)?,
             cli.verbose,
         )?;
-        let after = analysis::analyze(
-            &mut index,
-            &head_source,
-            options.context(&head_source)?,
-            cli.verbose,
-        )?;
+        let after = match head {
+            Some(revision) => {
+                let head_source = GitSource {
+                    root: root.clone(),
+                    revision: revision.clone(),
+                }
+                .snapshot()?;
+                analysis::analyze(
+                    &mut index,
+                    &head_source,
+                    options.context(&head_source)?,
+                    cli.verbose,
+                )?
+            }
+            None => analyze_working(&mut index, &root, options, cli.verbose)?,
+        };
         let report = review::compare(&index, &before, &after, *limit, *cursor)?;
         let code = report_code(&report);
         return Ok((report, code));
