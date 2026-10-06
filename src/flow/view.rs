@@ -1,6 +1,6 @@
 //! Terminal-width text layout shared by the interactive home screen and the
 //! plain report. Every line that refers to source carries its evidence.
-use super::{short_path, FlowMap, ReadMode, StepKind};
+use super::{short_path, Body, Exit, FlowMap, ReadMode, Step, StepKind};
 use crate::model::{Evidence, Snapshot};
 use std::collections::BTreeSet;
 use unicode_width::UnicodeWidthStr;
@@ -20,6 +20,10 @@ pub struct Row {
     pub text: String,
     pub tone: Tone,
     pub evidence: Option<Evidence>,
+    /// Path of an expandable step from its trunk's root, such as `0/3/1`.
+    pub key: Option<String>,
+    /// Another trunk this row opens.
+    pub link: Option<String>,
 }
 
 impl Row {
@@ -28,6 +32,8 @@ impl Row {
             text: text.into(),
             tone,
             evidence: None,
+            key: None,
+            link: None,
         }
     }
     fn at(text: impl Into<String>, tone: Tone, evidence: &Evidence) -> Self {
@@ -35,8 +41,124 @@ impl Row {
             text: text.into(),
             tone,
             evidence: Some(evidence.clone()),
+            key: None,
+            link: None,
         }
     }
+}
+
+/// Open steps of one trunk, by path from its root.
+pub type Expanded = BTreeSet<String>;
+
+/// Rows the trunk section may fill before the default expansion stops in
+/// plain output; the terminal uses its own height.
+pub const FIRST_SCREEN_ROWS: usize = 30;
+
+fn expandable<'a>(map: &'a FlowMap, step: &Step, stack: &[&str]) -> Option<&'a Body> {
+    let target = step.target.as_deref()?;
+    if step.inner == 0 || stack.contains(&target) {
+        return None;
+    }
+    map.bodies.get(target)
+}
+
+fn step_rows(step: &Step, open: bool, expandable: bool) -> usize {
+    if expandable && !open {
+        return 1 + step.exits.len().saturating_sub(1).min(3);
+    }
+    let exits = step.exits.len() + step.inner_exits.len();
+    1 + exits.saturating_sub(1).min(3) + usize::from(exits > 4)
+}
+
+/// A body whose only step is a call: it just hands over and is opened.
+fn thin(body: &Body) -> bool {
+    body.steps.len() == 1 && body.steps[0].kind == StepKind::Call && body.steps[0].inner > 0
+}
+
+/// Default expansion: pass through thin wrappers, then open whole levels
+/// while they fit the first screen. Siblings are always opened together.
+pub fn initial(map: &FlowMap, root: &str, budget: usize) -> Expanded {
+    let mut expanded = Expanded::new();
+    let Some(mut body) = map.bodies.get(root) else {
+        return expanded;
+    };
+    let mut prefix = String::new();
+    let mut stack = vec![root];
+    while thin(body) {
+        let Some(next) = expandable(map, &body.steps[0], &stack) else {
+            break;
+        };
+        expanded.insert(format!("{prefix}0"));
+        prefix.push_str("0/");
+        stack.push(body.steps[0].target.as_deref().unwrap_or_default());
+        body = next;
+    }
+    let mut rows: usize = body
+        .steps
+        .iter()
+        .map(|s| step_rows(s, false, s.inner > 0))
+        .sum();
+    let mut frontier: Vec<(String, &Body, Vec<&str>)> = vec![(prefix, body, stack)];
+    loop {
+        let mut next = Vec::new();
+        let mut added = 0;
+        let mut keys = Vec::new();
+        for (prefix, body, stack) in &frontier {
+            for (index, step) in body.steps.iter().enumerate() {
+                if let Some(child) = expandable(map, step, stack) {
+                    let key = format!("{prefix}{index}");
+                    added += child
+                        .steps
+                        .iter()
+                        .map(|s| step_rows(s, false, s.inner > 0))
+                        .sum::<usize>();
+                    let mut child_stack = stack.clone();
+                    child_stack.push(step.target.as_deref().unwrap_or_default());
+                    next.push((format!("{key}/"), child, child_stack));
+                    keys.push(key);
+                }
+            }
+        }
+        if keys.is_empty() || rows + added > budget {
+            return expanded;
+        }
+        rows += added;
+        expanded.extend(keys);
+        frontier = next;
+    }
+}
+
+/// Every expandable step down to `depth` levels below the root.
+pub fn to_depth(map: &FlowMap, root: &str, depth: usize) -> Expanded {
+    fn walk(
+        map: &FlowMap,
+        id: &str,
+        prefix: &str,
+        left: usize,
+        stack: &mut Vec<String>,
+        out: &mut Expanded,
+    ) {
+        let Some(body) = map.bodies.get(id) else {
+            return;
+        };
+        if left == 0 {
+            return;
+        }
+        for (index, step) in body.steps.iter().enumerate() {
+            let refs: Vec<&str> = stack.iter().map(String::as_str).collect();
+            if expandable(map, step, &refs).is_some() {
+                let key = format!("{prefix}{index}");
+                let target = step.target.clone().unwrap_or_default();
+                out.insert(key.clone());
+                stack.push(target.clone());
+                walk(map, &target, &format!("{key}/"), left - 1, stack, out);
+                stack.pop();
+            }
+        }
+    }
+    let mut out = initial(map, root, 0);
+    walk(map, root, "", depth, &mut vec![root.to_owned()], &mut out);
+    out
 }
 
 fn cells(text: &str) -> usize {
@@ -215,7 +337,7 @@ fn summarize_reads(reads: &[String]) -> Option<String> {
 
 /// The home screen: entries, the trunk in source order with exits and
 /// configuration reads, shared state and external systems.
-pub fn home(header: &Header, map: &FlowMap, width: usize) -> Vec<Row> {
+pub fn home(header: &Header, map: &FlowMap, width: usize, expanded: &Expanded) -> Vec<Row> {
     let width = width.max(60);
     let mut rows = Vec::new();
     let left = crate::localize!(
@@ -264,10 +386,336 @@ pub fn home(header: &Header, map: &FlowMap, width: usize) -> Vec<Row> {
     rows.push(Row::new("═".repeat(width), Tone::Dim));
     entries(header, map, width, &mut rows);
     rows.push(Row::new("", Tone::Normal));
-    trunk(map, width, &mut rows);
+    if let Some(trunk) = &map.trunk {
+        let mut title = if trunk.routes > 0 {
+            crate::localize!(
+                "主干  {} · {} 个入口",
+                "Trunk {} · {} entries",
+                trunk.label,
+                trunk.routes
+            )
+        } else {
+            crate::localize!("主干  {}", "Trunk {}", trunk.label)
+        };
+        // When entries do not share a handler, say how this one was chosen.
+        if trunk.routes <= 1 && map.trunks.len() >= 3 {
+            title.push_str(&crate::localize!(
+                "（{} 个处理函数中可达函数最多的；r 看其他）",
+                " (most reaching of {} handlers; r for others)",
+                map.trunks.len() + 1
+            ));
+        }
+        tree(
+            map,
+            &trunk.id,
+            &title,
+            &trunk.evidence,
+            width,
+            expanded,
+            &mut rows,
+        );
+    } else {
+        rows.push(Row::new(
+            crate::localize!(
+                "主干  未能确定主干：没有路由处理函数或程序入口可以展开。",
+                "Trunk No trunk: no route handler or program entry could be expanded."
+            ),
+            Tone::Dim,
+        ));
+    }
     rows.push(Row::new("", Tone::Normal));
     footer(map, width, &mut rows);
     rows
+}
+
+/// One trunk on its own page, opened from the entry list.
+pub fn trunk_page(map: &FlowMap, root: &str, width: usize, expanded: &Expanded) -> Vec<Row> {
+    let width = width.max(60);
+    let mut rows = Vec::new();
+    let Some(body) = map.bodies.get(root) else {
+        rows.push(Row::new(
+            crate::localize!(
+                "这个入口没有可展开的步骤。",
+                "This entry has no expandable steps."
+            ),
+            Tone::Dim,
+        ));
+        return rows;
+    };
+    let routes: Vec<String> = map
+        .routes
+        .iter()
+        .filter(|r| r.handler_id.as_deref() == Some(root))
+        .map(|r| format!("{} {}", r.method, r.path))
+        .collect();
+    let title = if routes.is_empty() {
+        crate::localize!("主干  {}", "Trunk {}", body.label)
+    } else {
+        crate::localize!(
+            "主干  {} · {}",
+            "Trunk {} · {}",
+            body.label,
+            routes.join("  ")
+        )
+    };
+    tree(
+        map,
+        root,
+        &title,
+        &body.evidence,
+        width,
+        expanded,
+        &mut rows,
+    );
+    rows
+}
+
+fn exit_rows(exits: &[&Exit]) -> Vec<String> {
+    exits
+        .iter()
+        .map(|e| exit_text(&e.status, e.code.as_deref()))
+        .collect()
+}
+
+fn tree(
+    map: &FlowMap,
+    root: &str,
+    title: &str,
+    evidence: &Evidence,
+    width: usize,
+    expanded: &Expanded,
+    rows: &mut Vec<Row>,
+) {
+    let layout = Layout::new(width);
+    let mut heading = pad(title, layout.exit_column);
+    if layout.exits_width > 0 {
+        heading.push_str(crate::localize!("可能的提前结束", "Early exits"));
+    }
+    rows.push(Row::at(heading, Tone::Heading, evidence));
+    let Some(body) = map.bodies.get(root) else {
+        return;
+    };
+    let exits: Vec<&Exit> = body.exits.iter().collect();
+    layout.push(
+        rows,
+        format!("  ↳ {}", body.label),
+        &body.evidence,
+        &exit_rows(&exits),
+        Tone::Accent,
+        None,
+        "    ",
+    );
+    let mut number = 0;
+    render_body(
+        map,
+        root,
+        "",
+        "    ",
+        expanded,
+        &layout,
+        &mut vec![root.to_owned()],
+        &mut number,
+        rows,
+    );
+}
+
+struct Layout {
+    exits_width: usize,
+    exit_column: usize,
+    label_width: usize,
+}
+
+impl Layout {
+    fn new(width: usize) -> Self {
+        let exits_width = if width >= 100 { 34 } else { 0 };
+        let exit_column = width.saturating_sub(exits_width);
+        Self {
+            exits_width,
+            exit_column,
+            label_width: exit_column.saturating_sub(22).max(24),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push(
+        &self,
+        rows: &mut Vec<Row>,
+        left: String,
+        evidence: &Evidence,
+        exits: &[String],
+        tone: Tone,
+        key: Option<String>,
+        continuation: &str,
+    ) {
+        let mut line = pad(&left, self.label_width);
+        line.push_str("  ");
+        line.push_str(&pad(&location(evidence), 20));
+        let line = pad(&line, self.exit_column);
+        let text = match (exits.first(), self.exits_width) {
+            (Some(exit), w) if w > 0 => format!("{line}{}", fit(exit, w)),
+            _ => line.trim_end().to_owned(),
+        };
+        rows.push(Row {
+            text,
+            tone,
+            evidence: Some(evidence.clone()),
+            key,
+            link: None,
+        });
+        let rest = if self.exits_width > 0 {
+            &exits[exits.len().min(1)..]
+        } else {
+            exits
+        };
+        for exit in rest.iter().take(3) {
+            let text = if self.exits_width > 0 {
+                format!(
+                    "{}{}",
+                    pad(continuation, self.exit_column),
+                    fit(exit, self.exits_width)
+                )
+            } else {
+                format!("{continuation}     {exit}")
+            };
+            rows.push(Row::new(text, Tone::Exit));
+        }
+        if rest.len() > 3 {
+            rows.push(Row::new(
+                format!(
+                    "{}{}",
+                    pad(continuation, self.exit_column),
+                    crate::localize!(
+                        "  另 {} 个，按 e 查看",
+                        "  {} more, press e",
+                        rest.len() - 3
+                    )
+                ),
+                Tone::Dim,
+            ));
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_body(
+    map: &FlowMap,
+    id: &str,
+    prefix: &str,
+    lead: &str,
+    expanded: &Expanded,
+    layout: &Layout,
+    stack: &mut Vec<String>,
+    number: &mut usize,
+    rows: &mut Vec<Row>,
+) {
+    let Some(body) = map.bodies.get(id) else {
+        return;
+    };
+    let mut in_loop = false;
+    for (index, step) in body.steps.iter().enumerate() {
+        let key = format!("{prefix}{index}");
+        if step.kind == StepKind::Loop {
+            in_loop = true;
+            layout.push(
+                rows,
+                format!("{lead}⟳ {}", step.label),
+                &step.evidence,
+                &[],
+                Tone::Heading,
+                None,
+                lead,
+            );
+            continue;
+        }
+        if !step.in_loop {
+            in_loop = false;
+        }
+        let bar = if in_loop { "│ " } else { "" };
+        let refs: Vec<&str> = stack.iter().map(String::as_str).collect();
+        let child = expandable(map, step, &refs);
+        let open = child.is_some() && expanded.contains(&key);
+        let marker = match (child.is_some(), open) {
+            (true, false) => "+ ",
+            (true, true) => "- ",
+            _ => "  ",
+        };
+        let numbered = if step.kind == StepKind::Guard {
+            "   ".to_owned()
+        } else {
+            *number += 1;
+            format!("{:>2} ", *number)
+        };
+        let mut label = step.label.clone();
+        if let Some(arm) = &step.arm {
+            label.push_str(&format!(" [{arm}]"));
+        }
+        match step.kind {
+            StepKind::Dispatch => label.push_str(&crate::localize!(
+                "  {} 个实现",
+                "  {} impls",
+                step.candidates
+            )),
+            StepKind::Unresolved => {
+                label.push_str(crate::localize!("  目标未确定", "  target unknown"))
+            }
+            _ => {}
+        }
+        if child.is_some() && !open {
+            label.push_str(&crate::localize!(" · {} 步", " · {} steps", step.inner));
+        }
+        let mut left = format!("{lead}{bar}{numbered}{marker}{label}");
+        if let Some(reads) = summarize_reads(&step.reads) {
+            let config = format!("  {} {reads}", crate::localize!("[配置]", "[cfg]"));
+            if cells(&left) + cells(&config) <= layout.label_width {
+                left.push_str(&config);
+            }
+        }
+        let mut exits = exit_rows(&step.exits.iter().collect::<Vec<_>>());
+        if !open && !step.inner_exits.is_empty() {
+            if child.is_some() {
+                // A collapsed step summarizes what lies inside on one line.
+                let first = &step.inner_exits[0];
+                let total = step.inner_exits.len();
+                let mut line = exit_text(&first.status, first.code.as_deref());
+                if total > 1 {
+                    line.push_str(&crate::localize!(" 等 {} 个", " +{} more", total - 1));
+                }
+                exits.push(line);
+            } else {
+                exits.extend(exit_rows(&step.inner_exits.iter().collect::<Vec<_>>()));
+            }
+        }
+        let tone = match step.kind {
+            StepKind::Guard => Tone::Dim,
+            _ => Tone::Normal,
+        };
+        let continuation = format!("{lead}{bar}");
+        layout.push(
+            rows,
+            left,
+            &step.evidence,
+            &exits,
+            tone,
+            child.is_some().then(|| key.clone()),
+            &continuation,
+        );
+        if open {
+            let target = step.target.clone().unwrap_or_default();
+            stack.push(target.clone());
+            render_body(
+                map,
+                &target,
+                &format!("{key}/"),
+                &format!("{lead}{bar}   "),
+                expanded,
+                layout,
+                stack,
+                number,
+                rows,
+            );
+            stack.pop();
+        }
+    }
 }
 
 fn language(language: &str) -> &str {
@@ -305,6 +753,8 @@ fn entries(header: &Header, map: &FlowMap, width: usize, rows: &mut Vec<Row>) {
             text,
             tone: Tone::Normal,
             evidence,
+            key: None,
+            link: None,
         });
         return;
     }
@@ -449,6 +899,8 @@ fn wrap_paths(prefix: &str, routes: &[&super::Route], width: usize, rows: &mut V
                 text: format!("{prefix}{}", line.trim_end()),
                 tone: Tone::Normal,
                 evidence: evidence.take(),
+                key: None,
+                link: None,
             });
             line.clear();
             evidence = Some(route.evidence.clone());
@@ -460,165 +912,9 @@ fn wrap_paths(prefix: &str, routes: &[&super::Route], width: usize, rows: &mut V
             text: format!("{prefix}{}", line.trim_end()),
             tone: Tone::Normal,
             evidence,
+            key: None,
+            link: None,
         });
-    }
-}
-
-fn trunk(map: &FlowMap, width: usize, rows: &mut Vec<Row>) {
-    let Some(trunk) = &map.trunk else {
-        rows.push(Row::new(
-            crate::localize!(
-                "主干  未能确定主干：没有路由处理函数或程序入口可以展开。",
-                "Trunk No trunk: no route handler or program entry could be expanded."
-            ),
-            Tone::Dim,
-        ));
-        return;
-    };
-    let exits_width = if width >= 100 { 34 } else { 0 };
-    let exit_column = width.saturating_sub(exits_width);
-    let location_width = 20;
-    let label_width = exit_column.saturating_sub(location_width + 2).max(24);
-    let mut title = if trunk.routes > 0 {
-        crate::localize!(
-            "主干  {} · {} 个入口",
-            "Trunk {} · {} entries",
-            trunk.label,
-            trunk.routes
-        )
-    } else {
-        crate::localize!("主干  {}", "Trunk {}", trunk.label)
-    };
-    // When entries do not share a handler, say how this one was chosen.
-    if trunk.routes <= 1 && map.trunks.len() >= 3 {
-        title.push_str(&crate::localize!(
-            "（{} 个处理函数中可达函数最多的；r 看其他）",
-            " (most reaching of {} handlers; r for others)",
-            map.trunks.len() + 1
-        ));
-    }
-    let mut heading = pad(&title, exit_column);
-    if exits_width > 0 {
-        heading.push_str(crate::localize!("可能的提前结束", "Early exits"));
-    }
-    rows.push(Row::at(heading, Tone::Heading, &trunk.evidence));
-    let mut number = 0;
-    let mut loop_depth: Option<usize> = None;
-    for step in &trunk.steps {
-        if let Some(depth) = loop_depth {
-            if !step.in_loop || step.depth < depth {
-                loop_depth = None;
-            }
-        }
-        let indent = "  ".repeat(step.depth + 1);
-        let bar = match loop_depth {
-            Some(depth) if step.depth >= depth && step.kind != StepKind::Loop => "│ ",
-            _ => "",
-        };
-        let (marker, tone) = match step.kind {
-            StepKind::Inline => ("↳ ".to_owned(), Tone::Accent),
-            StepKind::Loop => ("⟳ ".to_owned(), Tone::Heading),
-            StepKind::Guard => ("   ".to_owned(), Tone::Dim),
-            _ => {
-                number += 1;
-                (format!("{number:>2} "), Tone::Normal)
-            }
-        };
-        let mut label = step.label.clone();
-        if let Some(arm) = &step.arm {
-            label.push_str(&format!(" [{arm}]"));
-        }
-        match step.kind {
-            StepKind::Dispatch => label.push_str(&crate::localize!(
-                "  {} 个实现",
-                "  {} impls",
-                step.candidates
-            )),
-            StepKind::Unresolved => {
-                label.push_str(crate::localize!("  目标未确定", "  target unknown"))
-            }
-            _ => {}
-        }
-        let mut left = format!("{indent}{bar}{marker}{label}");
-        if let Some(reads) = summarize_reads(&step.reads) {
-            let config = format!("  {} {reads}", crate::localize!("[配置]", "[cfg]"));
-            if cells(&left) + cells(&config) <= label_width {
-                left.push_str(&config);
-            }
-        }
-        let mut line = pad(&left, label_width);
-        line.push_str("  ");
-        line.push_str(&pad(&location(&step.evidence), location_width));
-        let line = pad(&line, exit_column);
-        let mut exits = step.exits.iter();
-        let first = exits.next();
-        let text = match (first, exits_width) {
-            (Some(exit), w) if w > 0 => format!(
-                "{line}{}",
-                fit(&exit_text(&exit.status, exit.code.as_deref()), w)
-            ),
-            _ => line.trim_end().to_owned(),
-        };
-        rows.push(Row::at(text, tone, &step.evidence));
-        let continuation = format!(
-            "{indent}{bar}{}",
-            if bar.is_empty() && loop_depth.is_some() {
-                "│ "
-            } else {
-                ""
-            }
-        );
-        if exits_width > 0 {
-            for exit in exits.take(3) {
-                rows.push(Row::at(
-                    format!(
-                        "{}{}",
-                        pad(&continuation, exit_column),
-                        fit(&exit_text(&exit.status, exit.code.as_deref()), exits_width)
-                    ),
-                    Tone::Exit,
-                    &exit.evidence,
-                ));
-            }
-            if step.exits.len() > 4 {
-                rows.push(Row::new(
-                    format!(
-                        "{}{}",
-                        pad(&continuation, exit_column),
-                        crate::localize!(
-                            "  另 {} 个，按 e 查看",
-                            "  {} more, press e",
-                            step.exits.len() - 4
-                        )
-                    ),
-                    Tone::Dim,
-                ));
-            }
-        } else {
-            for exit in step.exits.iter().take(4) {
-                rows.push(Row::at(
-                    format!(
-                        "{continuation}     {}",
-                        exit_text(&exit.status, exit.code.as_deref())
-                    ),
-                    Tone::Exit,
-                    &exit.evidence,
-                ));
-            }
-        }
-        if step.kind == StepKind::Loop {
-            loop_depth = Some(step.depth);
-        }
-    }
-    if trunk.truncated {
-        rows.push(Row::new(
-            crate::localize!(
-                "  … 主干较长，只显示前 {} 步",
-                "  … long trunk; first {} steps shown",
-                trunk.steps.len()
-            ),
-            Tone::Dim,
-        ));
     }
 }
 
@@ -687,6 +983,8 @@ fn footer(map: &FlowMap, width: usize, rows: &mut Vec<Row>) {
                 text,
                 tone,
                 evidence: l.and_then(|row| row.evidence.clone()),
+                key: None,
+                link: None,
             });
         }
     }
@@ -694,8 +992,8 @@ fn footer(map: &FlowMap, width: usize, rows: &mut Vec<Row>) {
         if trunk.unresolved > 0 {
             rows.push(Row::new(
                 crate::localize!(
-                    "主干上 {} 处调用的目标无法由声明类型确定；只显示其中会提前结束的。",
-                    "{} trunk calls have targets not determined by declared types; only those with exits are shown.",
+                    "主干可达范围内 {} 处调用的目标无法由声明类型确定；只显示其中会提前结束的。",
+                    "{} calls within the trunk's reach have targets not determined by declared types; only those with exits are shown.",
                     trunk.unresolved
                 ),
                 Tone::Dim,
@@ -872,7 +1170,7 @@ pub fn trunks(map: &FlowMap) -> Vec<Row> {
         Tone::Heading,
     ));
     for trunk in &map.trunks {
-        rows.push(Row::at(
+        let mut row = Row::at(
             format!(
                 "  {}  {}  {}",
                 pad(&trunk.label, 44),
@@ -889,7 +1187,9 @@ pub fn trunks(map: &FlowMap) -> Vec<Row> {
             ),
             Tone::Normal,
             &trunk.evidence,
-        ));
+        );
+        row.link = Some(trunk.id.clone());
+        rows.push(row);
     }
     rows
 }

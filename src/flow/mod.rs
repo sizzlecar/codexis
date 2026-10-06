@@ -15,10 +15,10 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-pub const FLOW_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), ":flow:23");
-const MAX_STEPS: usize = 64;
-const MAX_INLINE_DEPTH: usize = 5;
+pub const FLOW_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), ":flow:24");
 const REACH_LIMIT: usize = 400;
+/// Functions with a stored body, so any reachable step can be expanded.
+const BODY_LIMIT: usize = 4000;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct FlowMap {
@@ -26,6 +26,8 @@ pub struct FlowMap {
     pub routes: Vec<Route>,
     pub trunk: Option<Trunk>,
     pub trunks: Vec<TrunkSummary>,
+    /// One level of steps per function; the map is a tree expanded on demand.
+    pub bodies: BTreeMap<String, Body>,
     pub errors: Vec<ErrorExit>,
     pub config: Vec<ConfigField>,
     pub shared: Vec<SharedState>,
@@ -48,16 +50,22 @@ pub struct Trunk {
     pub label: String,
     pub routes: usize,
     pub evidence: Evidence,
-    pub steps: Vec<Step>,
+    /// Calls within the trunk's reach whose targets are not determined.
     pub unresolved: usize,
-    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Body {
+    pub label: String,
+    pub evidence: Evidence,
+    /// Exits before the first call of the body.
+    pub exits: Vec<Exit>,
+    pub steps: Vec<Step>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StepKind {
-    /// A function whose body is expanded below it.
-    Inline,
     Call,
     /// A trait or interface method with several implementations.
     Dispatch,
@@ -71,16 +79,22 @@ pub enum StepKind {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Step {
     pub kind: StepKind,
-    pub depth: usize,
     pub label: String,
+    /// A function with a stored body: the step can be expanded.
     pub target: Option<String>,
     pub candidates: usize,
     pub arm: Option<String>,
+    /// Inside a loop of the same body (loop steps precede their members).
     pub in_loop: bool,
     pub evidence: Evidence,
+    /// Exits at this call site.
     pub exits: Vec<Exit>,
+    /// Exits inside the callee (up to two levels), shown while collapsed.
+    pub inner_exits: Vec<Exit>,
     pub reads: Vec<String>,
     pub state: Vec<String>,
+    /// Number of steps in the target's body.
+    pub inner: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -377,20 +391,72 @@ fn assemble(snapshot: &Snapshot, program: Program) -> FlowMap {
             candidates.insert(0, chosen);
         }
     }
+    // Bodies for everything reachable from any entry, so each can be expanded.
+    let mut queue: VecDeque<String> = candidates.iter().map(|c| c.0.clone()).collect();
+    let mut bodies: BTreeMap<String, Body> = BTreeMap::new();
+    while let Some(id) = queue.pop_front() {
+        if bodies.contains_key(&id) || bodies.len() >= BODY_LIMIT {
+            continue;
+        }
+        let Some(body) = expander.body(&id) else {
+            continue;
+        };
+        for step in &body.steps {
+            if let Some(target) = &step.target {
+                if !bodies.contains_key(target) {
+                    queue.push_back(target.clone());
+                }
+            }
+        }
+        bodies.insert(id, body);
+    }
+    let sizes: HashMap<String, usize> = bodies
+        .iter()
+        .map(|(id, b)| (id.clone(), b.steps.len()))
+        .collect();
+    for body in bodies.values_mut() {
+        for step in &mut body.steps {
+            match step.target.as_ref().and_then(|t| sizes.get(t)) {
+                Some(size) if *size > 0 => step.inner = *size,
+                _ => {
+                    step.target = None;
+                    step.inner = 0;
+                }
+            }
+        }
+    }
+    let trunk_functions: HashSet<String> = candidates
+        .first()
+        .map(|(id, _, _)| {
+            let mut set = expander.reach_set(id).clone();
+            set.insert(id.clone());
+            set
+        })
+        .unwrap_or_default();
     let trunk = candidates.first().map(|(id, count, _)| {
-        expander.expand(id, 0, false, None);
         let function = &program.functions[id];
         Trunk {
             id: id.clone(),
             label: function.label.clone(),
             routes: *count,
             evidence: function.evidence.clone(),
-            steps: std::mem::take(&mut expander.steps),
-            unresolved: expander.unresolved,
-            truncated: expander.truncated,
+            unresolved: trunk_functions
+                .iter()
+                .filter_map(|f| program.functions.get(f))
+                .flat_map(|f| &f.events)
+                .filter(|e| {
+                    matches!(
+                        e.kind,
+                        EventKind::Call {
+                            target: Target::Unknown,
+                            anchor: true,
+                            ..
+                        }
+                    )
+                })
+                .count(),
         }
     });
-    let trunk_functions = expander.visited.clone();
     let trunks = candidates
         .iter()
         .skip(1)
@@ -504,6 +570,7 @@ fn assemble(snapshot: &Snapshot, program: Program) -> FlowMap {
         routes,
         trunk,
         trunks,
+        bodies,
         errors,
         config,
         shared,
@@ -514,17 +581,11 @@ fn assemble(snapshot: &Snapshot, program: Program) -> FlowMap {
 /// An error status and its machine-readable code, if any.
 type ExitCode = (String, Option<String>);
 
-/// Expands the trunk in source order. A callee is shown inline only when it
-/// carries most of the remaining work (the largest reachable call set); other
-/// callees are single steps summarizing their own exits, reads and state.
+/// Builds one level of steps per function in source order. Each call step
+/// summarizes its callee's exits, reads and state; expansion is the viewer's.
 struct Expander<'a> {
     program: &'a Program,
     reach: HashMap<String, HashSet<String>>,
-    steps: Vec<Step>,
-    path: Vec<String>,
-    visited: HashSet<String>,
-    unresolved: usize,
-    truncated: bool,
 }
 
 #[derive(Default)]
@@ -566,11 +627,6 @@ impl<'a> Expander<'a> {
         Self {
             program,
             reach: HashMap::new(),
-            steps: Vec::new(),
-            path: Vec::new(),
-            visited: HashSet::new(),
-            unresolved: 0,
-            truncated: false,
         }
     }
 
@@ -630,11 +686,7 @@ impl<'a> Expander<'a> {
     /// Exits, reads and state touched by a callee and its own callees.
     fn summary(&self, id: &str, depth: usize, seen: &mut HashSet<String>) -> Attached {
         let mut result = Attached::default();
-        if depth > 2
-            || !seen.insert(id.to_owned())
-            || (depth > 0 && self.visited.contains(id))
-            || self.path.iter().any(|p| p == id)
-        {
+        if depth > 2 || !seen.insert(id.to_owned()) {
             return result;
         }
         let Some(function) = self.program.functions.get(id) else {
@@ -679,58 +731,11 @@ impl<'a> Expander<'a> {
         result
     }
 
-    fn choose_spine(&mut self, callees: &[String]) -> Option<String> {
-        let mut best: Option<(String, usize)> = None;
-        for id in callees {
-            let size = self.reach(id);
-            if size >= 2 && best.as_ref().is_none_or(|(_, s)| size > *s) {
-                best = Some((id.clone(), size));
-            }
-        }
-        let (mut spine, _) = best?;
-        // Prefer a shared core: when the largest callee reaches a sibling and
-        // adds little beyond it (as a batch wrapper around the single path),
-        // the sibling is the trunk. A callee that merely checks something
-        // first keeps its own, larger work.
-        loop {
-            let set = self.reach_set(&spine).clone();
-            let mut next = None;
-            for candidate in callees.iter().filter(|c| **c != spine && set.contains(*c)) {
-                let inner = self.reach_set(candidate).clone();
-                let extra = set
-                    .iter()
-                    .filter(|f| *f != candidate && !inner.contains(*f))
-                    .count();
-                if extra * 5 <= set.len()
-                    && next.as_ref().is_none_or(|(_, size)| inner.len() > *size)
-                {
-                    next = Some((candidate.clone(), inner.len()));
-                }
-            }
-            match next {
-                Some((id, _)) => spine = id,
-                None => return Some(spine),
-            }
-        }
-    }
-
-    fn push(&mut self, step: Step) -> bool {
-        if self.steps.len() >= MAX_STEPS {
-            self.truncated = true;
-            return false;
-        }
-        self.steps.push(step);
-        true
-    }
-
-    fn expand(&mut self, id: &str, depth: usize, in_loop: bool, call_site: Option<&Event>) {
+    /// One level of steps for a function, in source order.
+    fn body(&mut self, id: &str) -> Option<Body> {
         let program = self.program;
-        let Some(function) = program.functions.get(id) else {
-            return;
-        };
+        let function = program.functions.get(id)?;
         let events = &function.events;
-        self.path.push(id.to_owned());
-        self.visited.insert(id.to_owned());
         let helpers: Vec<Option<Vec<ExitCode>>> = events
             .iter()
             .map(|event| match &event.kind {
@@ -827,78 +832,6 @@ impl<'a> Expander<'a> {
                 None => header.merge(item),
             }
         }
-        let callees: Vec<String> = anchors
-            .iter()
-            .filter_map(|a| match &events[*a].kind {
-                EventKind::Call {
-                    target: Target::Function(target),
-                    ..
-                } if !self.path.contains(target) => Some(target.clone()),
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let others = callees.iter().filter(|c| self.reach(c) > 0).count();
-        let fresh: Vec<String> = callees
-            .iter()
-            .filter(|c| !self.visited.contains(*c))
-            .cloned()
-            .collect();
-        let spine = if depth < MAX_INLINE_DEPTH {
-            self.choose_spine(&fresh)
-                .filter(|_| depth < 2 || others <= 3)
-        } else {
-            None
-        };
-        // Near the entry, a handler often prepares and then executes: every
-        // callee carrying a large share of the work is expanded, unless one
-        // already reaches the other.
-        let mut spines: Vec<String> = spine.iter().cloned().collect();
-        // The handler itself and thin wrappers (at most two calls of their
-        // own) show their sequence in full; elsewhere a sibling is expanded
-        // only when it is not a repeat of the primary's work.
-        let wrapper = depth == 0 || others <= 2;
-        if let (Some(primary), true) = (&spine, depth < 3) {
-            let primary_reach = self.reach_set(primary).clone();
-            let threshold = (primary_reach.len() * 3 / 10).max(3);
-            for callee in &fresh {
-                if spines.contains(callee) || (!wrapper && primary_reach.contains(callee)) {
-                    continue;
-                }
-                if program.functions.get(callee).is_some_and(|f| f.sink) {
-                    continue;
-                }
-                let reach = self.reach_set(callee).clone();
-                let own = reach.iter().filter(|f| !primary_reach.contains(*f)).count();
-                if reach.len() >= threshold
-                    && (wrapper || (!reach.contains(primary) && own * 2 >= reach.len()))
-                {
-                    spines.push(callee.clone());
-                }
-            }
-        }
-        // A function expanded once is a plain step afterwards.
-        spines.retain(|s| !self.visited.contains(s));
-        let entry = Step {
-            kind: StepKind::Inline,
-            depth,
-            label: function.label.clone(),
-            target: Some(id.to_owned()),
-            candidates: 0,
-            arm: call_site.and_then(|e| e.arm.clone()),
-            in_loop,
-            evidence: call_site
-                .map(|e| e.evidence.clone())
-                .unwrap_or_else(|| function.evidence.clone()),
-            exits: header.exits,
-            reads: header.reads,
-            state: header.state,
-        };
-        if !self.push(entry) {
-            self.path.pop();
-            return;
-        }
         let loops: Vec<(usize, usize, String, Evidence)> = events
             .iter()
             .filter_map(|e| match &e.kind {
@@ -918,8 +851,8 @@ impl<'a> Expander<'a> {
             .collect();
         items.extend(guards.keys().map(|start| (*start, Item::Guard(*start))));
         items.sort_by_key(|(position, _)| *position);
+        let mut steps = Vec::new();
         let mut opened: Vec<usize> = Vec::new();
-        let mut shown_spines: HashSet<String> = HashSet::new();
         let mut shown: HashSet<String> = HashSet::new();
         for (position, item) in items {
             let inside: Vec<usize> = loops
@@ -928,29 +861,27 @@ impl<'a> Expander<'a> {
                 .filter(|(_, (start, end, _, _))| position > *start && position < *end)
                 .map(|(i, _)| i)
                 .collect();
-            let step_in_loop = in_loop || !inside.is_empty();
+            let in_loop = !inside.is_empty();
             let index = match item {
                 Item::Guard(start) => {
                     let Some((label, evidence, extra)) = guards.remove(&start) else {
                         continue;
                     };
-                    self.open_loops(&loops, &inside, &mut opened, depth, in_loop);
-                    let step = Step {
+                    open_loops(&mut steps, &loops, &inside, &mut opened);
+                    steps.push(Step {
                         kind: StepKind::Guard,
-                        depth,
                         label,
                         target: None,
                         candidates: 0,
                         arm: None,
-                        in_loop: step_in_loop,
+                        in_loop,
                         evidence,
                         exits: extra.exits,
+                        inner_exits: vec![],
                         reads: vec![],
                         state: vec![],
-                    };
-                    if !self.push(step) {
-                        break;
-                    }
+                        inner: 0,
+                    });
                     continue;
                 }
                 Item::Call(index) => index,
@@ -960,109 +891,109 @@ impl<'a> Expander<'a> {
                 continue;
             };
             let extra = attached.remove(&index).unwrap_or_default();
-            let (kind, step_target, candidates, summary) = match target {
-                Target::Function(target)
-                    if spines.contains(target) && !shown_spines.contains(target) =>
-                {
-                    shown_spines.insert(target.clone());
-                    shown.insert(target.clone());
-                    self.open_loops(&loops, &inside, &mut opened, depth, in_loop);
-                    if self.steps.len() >= MAX_STEPS {
-                        self.truncated = true;
-                        break;
-                    }
-                    let before = self.steps.len();
-                    self.expand(target, depth + 1, step_in_loop, Some(event));
-                    if let Some(step) = self.steps.get_mut(before) {
-                        let mut merged = Attached {
-                            exits: std::mem::take(&mut step.exits),
-                            reads: std::mem::take(&mut step.reads),
-                            state: std::mem::take(&mut step.state),
-                        };
-                        merged.merge(extra);
-                        step.exits = merged.exits;
-                        step.reads = merged.reads;
-                        step.state = merged.state;
-                    }
-                    continue;
-                }
+            let (kind, step_target, candidates, inner) = match target {
                 Target::Function(target) => {
                     if shown.contains(target) && extra.exits.is_empty() {
                         continue;
                     }
                     let sink = program.functions.get(target).is_some_and(|f| f.sink);
-                    let mut summary = self.summary(target, 0, &mut HashSet::new());
+                    let summary = self.summary(target, 0, &mut HashSet::new());
                     if sink && extra.exits.is_empty() && summary.exits.is_empty() {
                         continue;
                     }
                     if self.reach(target) < 2 && summary.is_empty() && extra.is_empty() {
                         continue;
                     }
-                    summary.merge(extra);
                     shown.insert(target.clone());
-                    self.visited.insert(target.clone());
                     (StepKind::Call, Some(target.clone()), 0, summary)
                 }
-                Target::Dispatch(candidates) => (StepKind::Dispatch, None, candidates.len(), extra),
-                Target::External if !extra.exits.is_empty() => (StepKind::Call, None, 0, extra),
-                Target::Unknown => {
-                    self.unresolved += 1;
-                    if extra.exits.is_empty() {
-                        continue;
-                    }
-                    (StepKind::Unresolved, None, 0, extra)
+                Target::Dispatch(candidates) => (
+                    StepKind::Dispatch,
+                    None,
+                    candidates.len(),
+                    Attached::default(),
+                ),
+                Target::External if !extra.exits.is_empty() => {
+                    (StepKind::Call, None, 0, Attached::default())
                 }
-                Target::External => continue,
+                Target::Unknown if !extra.exits.is_empty() => {
+                    (StepKind::Unresolved, None, 0, Attached::default())
+                }
+                Target::External | Target::Unknown => continue,
             };
-            self.open_loops(&loops, &inside, &mut opened, depth, in_loop);
-            let step = Step {
+            open_loops(&mut steps, &loops, &inside, &mut opened);
+            let mut reads = extra.reads.clone();
+            for read in inner.reads {
+                if !reads.contains(&read) {
+                    reads.push(read);
+                }
+            }
+            let mut state = extra.state.clone();
+            for item in inner.state {
+                if !state.contains(&item) {
+                    state.push(item);
+                }
+            }
+            let inner_exits = inner
+                .exits
+                .into_iter()
+                .filter(|e| {
+                    !extra
+                        .exits
+                        .iter()
+                        .any(|o| o.status == e.status && o.code == e.code)
+                })
+                .collect();
+            steps.push(Step {
                 kind,
-                depth,
                 label: label.clone(),
                 target: step_target,
                 candidates,
                 arm: event.arm.clone(),
-                in_loop: step_in_loop,
-                evidence: event.evidence.clone(),
-                exits: summary.exits,
-                reads: summary.reads,
-                state: summary.state,
-            };
-            if !self.push(step) {
-                break;
-            }
-        }
-        self.path.pop();
-    }
-
-    fn open_loops(
-        &mut self,
-        loops: &[(usize, usize, String, Evidence)],
-        inside: &[usize],
-        opened: &mut Vec<usize>,
-        depth: usize,
-        in_loop: bool,
-    ) {
-        for index in inside {
-            if opened.contains(index) {
-                continue;
-            }
-            opened.push(*index);
-            let (_, _, header, evidence) = &loops[*index];
-            self.push(Step {
-                kind: StepKind::Loop,
-                depth,
-                label: header.clone(),
-                target: None,
-                candidates: 0,
-                arm: None,
                 in_loop,
-                evidence: evidence.clone(),
-                exits: vec![],
-                reads: vec![],
-                state: vec![],
+                evidence: event.evidence.clone(),
+                exits: extra.exits,
+                inner_exits,
+                reads,
+                state,
+                inner: 0,
             });
         }
+        Some(Body {
+            label: function.label.clone(),
+            evidence: function.evidence.clone(),
+            exits: header.exits,
+            steps,
+        })
+    }
+}
+
+fn open_loops(
+    steps: &mut Vec<Step>,
+    loops: &[(usize, usize, String, Evidence)],
+    inside: &[usize],
+    opened: &mut Vec<usize>,
+) {
+    for index in inside {
+        if opened.contains(index) {
+            continue;
+        }
+        opened.push(*index);
+        let (_, _, header, evidence) = &loops[*index];
+        steps.push(Step {
+            kind: StepKind::Loop,
+            label: header.clone(),
+            target: None,
+            candidates: 0,
+            arm: None,
+            in_loop: false,
+            evidence: evidence.clone(),
+            exits: vec![],
+            inner_exits: vec![],
+            reads: vec![],
+            state: vec![],
+            inner: 0,
+        });
     }
 }
 

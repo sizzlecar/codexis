@@ -449,7 +449,8 @@ fn handle_key(browser: &mut Browser<'_>, key: KeyEvent) -> Result<Option<jobs::R
                     title: crate::localize!("操作说明", "Keyboard help").into(),
                     lines: vec![
                         crate::localize!("↑↓ / j k  选择有源码位置的行", "↑↓ / j k  Select a line with a source position").into(),
-                        crate::localize!("Enter      打开所选行的固定快照源码", "Enter      Open pinned source for the selected line").into(),
+                        crate::localize!("Enter      展开或收起带 + / - 的步骤；其他行打开源码", "Enter      Expand or collapse a step marked + / -; other lines open source").into(),
+                        crate::localize!("o          打开所选行的固定快照源码", "o          Open pinned source for the selected line").into(),
                         crate::localize!("e          全部错误出口（状态码与错误码）", "e          Every error exit (status and code)").into(),
                         crate::localize!("c          配置项、读取位置与读取方式", "c          Configuration fields, read sites and read modes").into(),
                         crate::localize!("s          共享状态与读写位置", "s          Shared state and access sites").into(),
@@ -461,6 +462,7 @@ fn handle_key(browser: &mut Browser<'_>, key: KeyEvent) -> Result<Option<jobs::R
                         String::new(),
                         crate::localize!("脉络图只来自源码：路由注册、按声明类型确定的调用、错误字面量、配置结构与依赖清单。", "The map comes only from source: route registrations, calls determined by declared types, error literals, configuration types and manifests.").into(),
                         crate::localize!("调用顺序是源码顺序，不是一次真实运行的顺序；目标无法确定的调用会标明。", "Call order is source order, not a recorded run; calls whose targets cannot be determined are marked.").into(),
+                        crate::localize!("首屏先穿过只转调一次的函数，再整层展开到填满一屏，不替你挑重点。", "The first screen passes through single hand-offs, then opens whole levels while they fit; it does not pick favorites.").into(),
                     ],
                 })?;
                 return Ok(None);
@@ -832,12 +834,16 @@ fn draw_flow(
 fn page_shortcuts(browser: &Browser<'_>) -> &'static str {
     match browser.page.action {
         Action::Home => crate::localize!(
-            "↑↓ 选行  Enter 源码  e 错误码  c 配置  s 共享状态  r 入口  v 查看改动  d 深入分析  / 搜索  ? 帮助  q 退出",
-            "↑↓ Select  Enter Source  e Errors  c Config  s State  r Entries  v Changes  d Explore  / Search  ? Help  q Exit"
+            "↑↓ 选行  Enter 展开/收起  o 源码  e 错误码  c 配置  s 共享状态  r 入口  v 查看改动  d 深入分析  ? 帮助  q 退出",
+            "↑↓ Select  Enter Expand  o Source  e Errors  c Config  s State  r Entries  v Changes  d Explore  ? Help  q Exit"
+        ),
+        Action::FlowTrunk(_) => crate::localize!(
+            "↑↓ 选行  Enter 展开/收起  o 源码  b 返回  g 脉络图  ? 帮助  q 退出",
+            "↑↓ Select  Enter Expand  o Source  b Back  g Flow map  ? Help  q Exit"
         ),
         Action::FlowView(_) => crate::localize!(
-            "↑↓ 选行  Enter 源码  b 返回  g 脉络图  ? 帮助  q 退出",
-            "↑↓ Select  Enter Source  b Back  g Flow map  ? Help  q Exit"
+            "↑↓ 选行  Enter 打开  b 返回  g 脉络图  ? 帮助  q 退出",
+            "↑↓ Select  Enter Open  b Back  g Flow map  ? Help  q Exit"
         ),
         Action::Source(_) | Action::Diff { .. } | Action::Text { .. } => crate::localize!(
             "↑↓ 滚动  b 返回  ? 帮助  q 退出",

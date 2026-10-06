@@ -249,6 +249,9 @@ enum Command {
     Flow {
         #[arg(long, value_enum, default_value = "home")]
         view: FlowView,
+        /// Expand the trunk this many levels instead of the first-screen default.
+        #[arg(long, value_parser = parse_depth)]
+        depth: Option<usize>,
     },
     /// Query package or module structure in a stored snapshot.
     Map {
@@ -720,11 +723,12 @@ fn execute(cli: &Cli) -> Result<(Report<Value>, i32)> {
             &snapshot,
             serde_json::json!({"kind":"knowledge","records":crate::knowledge::list(&index,&snapshot,id.as_deref(),*history)?}),
         ),
-        Command::Flow { view } => Report::new(
+        Command::Flow { view, depth } => Report::new(
             &snapshot,
             serde_json::json!({
                 "kind": "flow",
                 "view": view.id(),
+                "depth": depth,
                 "header": crate::flow::view::Header::new(&snapshot),
                 "flow": crate::flow::build(&index, &snapshot)?,
             }),

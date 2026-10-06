@@ -344,3 +344,77 @@ fn background_review_handles_git_and_rejects_stale_semantic_input() {
     );
     assert!(finish(&mut stale).err().unwrap().contains("源码已变化"));
 }
+
+#[test]
+fn flow_steps_expand_and_collapse_in_place() {
+    let root = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    write(
+        root.path(),
+        "Cargo.toml",
+        "[package]\nname='layers'\nversion='0.1.0'\nedition='2021'\n",
+    );
+    write(
+        root.path(),
+        "src/main.rs",
+        r#"struct Error;
+impl Error { fn new(_status: u16, _code: &str) -> Self { Error } }
+fn main() { let _ = serve(); }
+fn serve() -> Result<(), Error> { prepare()?; respond() }
+fn prepare() -> Result<(), Error> {
+    if std::env::args().count() > 9 { return Err(Error::new(400, "bad_input")); }
+    Ok(())
+}
+fn respond() -> Result<(), Error> {
+    if std::env::args().count() > 8 { return Err(Error::new(503, "busy")); }
+    Ok(())
+}
+"#,
+    );
+    let mut index = Index::open(root.path(), Some(cache.path())).unwrap();
+    let source = WorkingTreeSource {
+        root: root.path().into(),
+    }
+    .snapshot()
+    .unwrap();
+    let snapshot = analysis::analyze(&mut index, &source, AnalysisContext::rust(), false).unwrap();
+    let mut ui = browser(&index, snapshot);
+    let row = |ui: &Browser<'_>, needle: &str| {
+        ui.page
+            .rows
+            .iter()
+            .find(|r| r.text.contains(needle))
+            .map(|r| r.text.clone())
+            .unwrap_or_default()
+    };
+    // The single hand-off is passed through and the next level fits.
+    assert!(row(&ui, "layers::serve").contains("- layers::serve"));
+    assert!(row(&ui, "layers::prepare").contains("- layers::prepare"));
+    let text = |ui: &Browser<'_>| {
+        ui.page
+            .rows
+            .iter()
+            .map(|r| r.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(!row(&ui, "main.rs:6").is_empty(), "{}", text(&ui));
+    assert!(text(&ui).contains("→ 400 bad_input"));
+    let position = ui
+        .page
+        .row_items
+        .iter()
+        .position(|r| ui.page.rows[*r].text.contains("layers::prepare"))
+        .unwrap();
+    ui.page.selected = position;
+    ui.enter().unwrap();
+    assert_eq!(ui.page.title, "脉络图", "Enter expands in place");
+    assert!(row(&ui, "layers::prepare").contains("+ layers::prepare · 1 步"));
+    assert!(row(&ui, "main.rs:6").is_empty(), "{}", text(&ui));
+    assert!(
+        text(&ui).contains("→ 400 bad_input"),
+        "collapsed steps keep their exits"
+    );
+    ui.enter().unwrap();
+    assert!(row(&ui, "layers::prepare").contains("- layers::prepare"));
+}

@@ -12,26 +12,28 @@ target/release/codexis analyze /path/to/project
 target/release/codexis --locale en analyze /path/to/project
 ```
 
-普通终端进入工作台，首屏是一张静态脉络图：入口（路由注册）、主干（从处理入口最多的函数出发，按源码顺序展开调用）、每一步可能的提前结束（状态码与错误码）、读取的配置、跨请求共享状态和外部系统。全部来自源码，不调用模型。调用目标只按声明类型确定（参数、字段、带类型或构造出来的局部变量、返回类型、`use`/`import`），确定不了的标为未确定；trait 或接口分派列出实现数量；调用顺序是源码顺序，不是一次真实运行的顺序。
+普通终端进入工作台，首屏是一张静态脉络图：入口（路由注册）、主干（从处理入口最多的函数出发，按源码顺序列出每一层调用；只转调一次的函数自动穿过，其余按整层展开到填满一屏，不替你挑重点）、每一步可能的提前结束（状态码与错误码）、读取的配置、跨请求共享状态和外部系统。全部来自源码，不调用模型。调用目标只按声明类型确定（参数、字段、带类型或构造出来的局部变量、返回类型、`use`/`import`），确定不了的标为未确定；trait 或接口分派列出实现数量；调用顺序是源码顺序，不是一次真实运行的顺序。
 
-The terminal opens on a static flow map: entries (route registrations), the trunk (calls expanded in source order from the handler serving the most entries), early exits with status and code, configuration reads, shared state and external systems. Everything comes from source; no model is called. Call targets are resolved only through declared types (parameters, fields, typed or constructed locals, return types, `use`/`import`); anything else is marked unknown, trait or interface dispatch lists its implementations, and order is source order rather than a recorded run.
+The terminal opens on a static flow map: entries (route registrations), the trunk (one level of calls at a time in source order from the handler serving the most entries; single hand-offs are passed through and whole levels open while they fit, without picking favorites), early exits with status and code, configuration reads, shared state and external systems. Everything comes from source; no model is called. Call targets are resolved only through declared types (parameters, fields, typed or constructed locals, return types, `use`/`import`); anything else is marked unknown, trait or interface dispatch lists its implementations, and order is source order rather than a recorded run.
 
 ```text
 shop-api  4f1c2d9  Rust · 3 packages · 120 files · 18420 lines              Static analysis · no model
 Entry POST /orders  /payments
 Trunk OrderHandler::handle · 2 entries                                     Early exits
-   1 Admission::admit  [cfg] limits                   handler.rs:41       → 429 too_busy
-      ⟳ for attempt in 0..policy.max_attempts         service.rs:88
-      │  4 BackendPool::select                        service.rs:93       → 503 no_backend
-      │  6 Ledger::reserve                            service.rs:120      → 503 ledger_full
+     1 + Admission::admit · 2 steps  [cfg] limits     handler.rs:41       → 429 too_busy
+     2 - OrderService::place                          handler.rs:44
+          ⟳ for attempt in 0..policy.max_attempts     service.rs:88
+          │  3 + BackendPool::select · 3 steps        service.rs:93       → 503 no_backend
+          │  4   Ledger::reserve                      service.rs:120      → 503 ledger_full
 ```
 
-首屏按键：`↑↓` 选行，Enter 打开固定快照源码；`e` 全部错误出口，`c` 配置项及读取位置和读取方式（读取时取当前值 / 使用调用方传入的值 / 使用持有的值），`s` 共享状态及读写位置，`r` 全部入口与其他主干，`v` 查看改动，`d` 深入分析（入口与调用、八维视角、项目解释、构建包与文件、阅读记录和分析范围），`/` 搜索，`?` 帮助。
+首屏按键：`↑↓` 选行，Enter 展开或收起带 `+`/`-` 的步骤（折叠时显示下面有几步和第一个出口），`o` 打开固定快照源码；`e` 全部错误出口，`c` 配置项及读取位置和读取方式（读取时取当前值 / 使用调用方传入的值 / 使用持有的值），`s` 共享状态及读写位置，`r` 全部入口与其他主干，`v` 查看改动，`d` 深入分析（入口与调用、八维视角、项目解释、构建包与文件、阅读记录和分析范围），`/` 搜索，`?` 帮助。
 
-Keys: `↑↓` select a line and Enter opens pinned source; `e` every error exit, `c` configuration with read sites and modes, `s` shared state with access sites, `r` every entry and other trunks, `v` review changes, `d` explore further (calls, eight perspectives, project explanation, packages, reading notes, scope), `/` search, `?` help.
+Keys: `↑↓` select a line, Enter expands or collapses a step marked `+`/`-` (collapsed steps show how many steps and the first exit inside), `o` opens pinned source; `e` every error exit, `c` configuration with read sites and modes, `s` shared state with access sites, `r` every entry and other trunks, `v` review changes, `d` explore further (calls, eight perspectives, project explanation, packages, reading notes, scope), `/` search, `?` help.
 
 ```sh
 codexis --project /path/to/project flow
+codexis --project /path/to/project flow --depth 3
 codexis --project /path/to/project flow --view errors|config|state|trunks
 ```
 

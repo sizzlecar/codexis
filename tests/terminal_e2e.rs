@@ -266,7 +266,8 @@ fn assert_simple_home(session: &TerminalSession, en: bool) {
     }
     for key in if en {
         [
-            "Enter Source",
+            "Enter Expand",
+            "o Source",
             "e Errors",
             "c Config",
             "s State",
@@ -275,7 +276,8 @@ fn assert_simple_home(session: &TerminalSession, en: bool) {
         ]
     } else {
         [
-            "Enter 源码",
+            "Enter 展开/收起",
+            "o 源码",
             "e 错误码",
             "c 配置",
             "s 共享状态",

@@ -34,20 +34,29 @@ fn flow(root: &Path, cache: &Path) -> Value {
     report["data"]["flow"].clone()
 }
 
-fn step<'a>(map: &'a Value, label: &str) -> &'a Value {
-    map["trunk"]["steps"]
+/// A step of the body of the function labelled `owner`.
+fn step<'a>(map: &'a Value, owner: &str, label: &str) -> &'a Value {
+    let body = map["bodies"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|b| b["label"] == owner)
+        .unwrap_or_else(|| panic!("no body {owner}: {:#}", map["bodies"]));
+    body["steps"]
         .as_array()
         .unwrap()
         .iter()
         .find(|s| s["label"].as_str().is_some_and(|l| l.starts_with(label)))
-        .unwrap_or_else(|| panic!("no trunk step {label}: {:#}", map["trunk"]))
+        .unwrap_or_else(|| panic!("no step {label} in {owner}: {body:#}"))
 }
 
+/// Exits at the call site and inside the callee.
 fn exits(step: &Value) -> Vec<String> {
     step["exits"]
         .as_array()
         .unwrap()
         .iter()
+        .chain(step["inner_exits"].as_array().unwrap())
         .map(|e| {
             format!(
                 "{} {}",
@@ -185,13 +194,23 @@ pub fn routes(router: &mut Router, engine: Arc<Engine>) {
     assert!(routes.contains(&"GET /health true".into()), "{routes:?}");
     assert_eq!(map["trunk"]["label"], "Api::handle");
     assert_eq!(map["trunk"]["routes"], 2);
-    assert_eq!(step(&map, "Engine::execute")["kind"], "inline");
-    assert_eq!(step(&map, "Engine::attempts")["kind"], "inline");
-    assert_eq!(step(&map, "if request.is_empty()")["kind"], "guard");
-    assert_eq!(exits(step(&map, "if request.is_empty()")), ["429 too_busy"]);
-    let header = step(&map, "for attempt in");
-    assert_eq!(header["kind"], "loop");
-    let select = step(&map, "Pool::select");
+    // Each body is one level; calls into bodies can be expanded.
+    let execute = step(&map, "Api::handle", "Engine::execute");
+    assert!(execute["inner"].as_u64().unwrap() > 0);
+    assert!(
+        step(&map, "Engine::execute", "Engine::attempts")["inner"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    let guard = step(&map, "Engine::attempts", "if request.is_empty()");
+    assert_eq!(guard["kind"], "guard");
+    assert_eq!(exits(guard), ["429 too_busy"]);
+    assert_eq!(
+        step(&map, "Engine::attempts", "for attempt in")["kind"],
+        "loop"
+    );
+    let select = step(&map, "Engine::attempts", "Pool::select");
     assert_eq!(select["in_loop"], true);
     assert_eq!(exits(select), ["503 no_backend"]);
     assert!(select["reads"]
@@ -199,7 +218,10 @@ pub fn routes(router: &mut Router, engine: Arc<Engine>) {
         .unwrap()
         .iter()
         .any(|r| r == "limits.max_inflight"));
-    assert_eq!(exits(step(&map, "Engine::send")), ["404 not_found"]);
+    assert_eq!(
+        exits(step(&map, "Engine::attempts", "Engine::send")),
+        ["404 not_found"]
+    );
     let config = map["config"].as_array().unwrap();
     let attempts = config
         .iter()
@@ -230,15 +252,33 @@ pub fn routes(router: &mut Router, engine: Arc<Engine>) {
         external.contains(&"mysql") && external.contains(&"http_client"),
         "{external:?}"
     );
+    // The first screen passes through the single hand-off and opens whole
+    // levels while they fit; --depth 1 shows only the handler's own level.
     let plain = codexis(root.path(), cache.path(), &["--plain", "analyze"]);
     for needed in [
         "主干  Api::handle · 2 个入口",
+        "- Engine::attempts",
         "⟳ for attempt in",
         "→ 503 no_backend",
-        "[配置]",
     ] {
         assert!(plain.contains(needed), "missing {needed}:\n{plain}");
     }
+    let shallow = codexis(
+        root.path(),
+        cache.path(),
+        &["--plain", "flow", "--depth", "1"],
+    );
+    assert!(shallow.contains("+ Engine::attempts · "), "{shallow}");
+    assert!(!shallow.contains("⟳ for attempt in"), "{shallow}");
+    let config = codexis(
+        root.path(),
+        cache.path(),
+        &["--plain", "flow", "--view", "config"],
+    );
+    assert!(
+        config.contains("retry.max_attempts") && config.contains("使用调用方传入的值"),
+        "{config}"
+    );
     let errors = codexis(
         root.path(),
         cache.path(),
@@ -351,7 +391,7 @@ def health():
         "{routes:?}"
     );
     assert_eq!(map["trunk"]["label"], "api.create");
-    let create = step(&map, "Service.create");
+    let create = step(&map, "api.create", "Service.create");
     let found = exits(create);
     // A subclass of an exception mapped in a dictionary is an exit too.
     for expected in ["400 missing_key", "409 store_full", "404 not_found"] {

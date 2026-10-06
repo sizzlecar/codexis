@@ -2,7 +2,7 @@ use super::jobs::{Completed, Request};
 use crate::{
     flow::{
         self,
-        view::{Header, Row},
+        view::{Expanded, Header, Row},
         FlowMap,
     },
     index::Index,
@@ -25,6 +25,8 @@ pub(super) enum Action {
     Home,
     /// A full-width flow list: errors, config, state or trunks.
     FlowView(String),
+    /// Another entry's trunk as an expandable tree.
+    FlowTrunk(String),
     Baseline,
     Explore,
     Dimensions,
@@ -219,6 +221,8 @@ pub(super) struct Browser<'a> {
     understanding: Value,
     flow: Arc<FlowMap>,
     header: Header,
+    /// Open steps per trunk root; starts from the default first-screen view.
+    expanded: BTreeMap<String, Expanded>,
     review: Option<Arc<Report<Value>>>,
     hashes: BTreeMap<String, String>,
     semantics: BTreeMap<String, Snapshot>,
@@ -249,6 +253,13 @@ impl<'a> Browser<'a> {
             }
         };
         let header = Header::new(&snapshot).described(&baseline);
+        let mut expanded = BTreeMap::new();
+        if let Some(trunk) = &flow.trunk {
+            expanded.insert(
+                trunk.id.clone(),
+                flow::view::initial(&flow, &trunk.id, screen_budget()),
+            );
+        }
         let mut browser = Self {
             index,
             snapshot,
@@ -257,6 +268,7 @@ impl<'a> Browser<'a> {
             understanding,
             flow: Arc::new(flow),
             header,
+            expanded,
             review: None,
             hashes,
             semantics: BTreeMap::new(),
@@ -283,7 +295,44 @@ impl<'a> Browser<'a> {
     }
 
     pub fn on_flow(&self) -> bool {
-        matches!(self.page.action, Action::Home | Action::FlowView(_))
+        matches!(
+            self.page.action,
+            Action::Home | Action::FlowView(_) | Action::FlowTrunk(_)
+        )
+    }
+
+    fn flow_root(&self) -> Option<String> {
+        match &self.page.action {
+            Action::Home => self.flow.trunk.as_ref().map(|t| t.id.clone()),
+            Action::FlowTrunk(id) => Some(id.clone()),
+            _ => None,
+        }
+    }
+
+    /// Open or close the selected `+` step; false when it is not expandable.
+    pub fn toggle(&mut self) -> Result<bool> {
+        let Some(root) = self.flow_root() else {
+            return Ok(false);
+        };
+        let key = self
+            .page
+            .row_items
+            .get(self.page.selected)
+            .and_then(|row| self.page.rows.get(*row))
+            .and_then(|row| row.key.clone());
+        let Some(key) = key else {
+            return Ok(false);
+        };
+        let set = self.expanded.entry(root).or_default();
+        if !set.remove(&key) {
+            set.insert(key.clone());
+        } else {
+            // Closing a step closes everything below it.
+            let prefix = format!("{key}/");
+            set.retain(|k| !k.starts_with(&prefix));
+        }
+        self.refresh()?;
+        Ok(true)
     }
 
     /// The change review entry: the last comparison, or a choice of scope.
@@ -301,7 +350,10 @@ impl<'a> Browser<'a> {
                 page.items.push(Item {
                     label: row.text.trim().to_owned(),
                     hint: format!("{}:{}", evidence.path, evidence.start_line),
-                    action: Action::Source(evidence.clone()),
+                    action: match &row.link {
+                        Some(trunk) => Action::FlowTrunk(trunk.clone()),
+                        None => Action::Source(evidence.clone()),
+                    },
                     detail: vec![],
                     evidence: Some(evidence.clone()),
                 });
@@ -324,6 +376,12 @@ impl<'a> Browser<'a> {
             self.back()?;
             self.refresh()?;
             return Ok(None);
+        }
+        if let Action::FlowTrunk(root) = &action {
+            if !self.expanded.contains_key(root) {
+                let initial = flow::view::initial(&self.flow, root, screen_budget());
+                self.expanded.insert(root.clone(), initial);
+            }
         }
         let previous_focus = self.focus.clone();
         match &action {
@@ -381,6 +439,9 @@ impl<'a> Browser<'a> {
     }
 
     pub fn enter(&mut self) -> Result<Option<Request>> {
+        if self.toggle()? {
+            return Ok(None);
+        }
         let Some(item) = self.page.items.get(self.page.selected) else {
             return Ok(None);
         };
@@ -1106,7 +1167,26 @@ impl<'a> Browser<'a> {
         match action {
             Action::Home => {
                 page.title = crate::localize!("脉络图", "Flow map").into();
-                let rows = flow::view::home(&self.header, &self.flow, screen_width());
+                let empty = Expanded::new();
+                let expanded = self
+                    .flow
+                    .trunk
+                    .as_ref()
+                    .and_then(|t| self.expanded.get(&t.id))
+                    .unwrap_or(&empty);
+                let rows = flow::view::home(&self.header, &self.flow, screen_width(), expanded);
+                Self::flow_rows(&mut page, rows);
+            }
+            Action::FlowTrunk(root) => {
+                page.title = self
+                    .flow
+                    .bodies
+                    .get(&root)
+                    .map(|b| b.label.clone())
+                    .unwrap_or_else(|| crate::localize!("主干", "Trunk").into());
+                let empty = Expanded::new();
+                let expanded = self.expanded.get(&root).unwrap_or(&empty);
+                let rows = flow::view::trunk_page(&self.flow, &root, screen_width(), expanded);
                 Self::flow_rows(&mut page, rows);
             }
             Action::FlowView(view) => {
@@ -2770,4 +2850,12 @@ fn screen_width() -> usize {
         .unwrap_or(112)
         .saturating_sub(2)
         .max(60)
+}
+
+/// Trunk rows that fit beside the title, entries and footer.
+fn screen_budget() -> usize {
+    crossterm::terminal::size()
+        .map(|(_, height)| usize::from(height).saturating_sub(20))
+        .unwrap_or(flow::view::FIRST_SCREEN_ROWS)
+        .max(8)
 }

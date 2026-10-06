@@ -1288,7 +1288,18 @@ pub fn flow_text(data: &Value, width: usize) -> anyhow::Result<String> {
         "trunks" => crate::flow::view::trunks(&map),
         _ => {
             let header: crate::flow::view::Header = serde_json::from_value(data["header"].clone())?;
-            crate::flow::view::home(&header, &map, width)
+            let expanded = match (data["depth"].as_u64(), &map.trunk) {
+                (Some(depth), Some(trunk)) => {
+                    crate::flow::view::to_depth(&map, &trunk.id, depth as usize)
+                }
+                (None, Some(trunk)) => crate::flow::view::initial(
+                    &map,
+                    &trunk.id,
+                    crate::flow::view::FIRST_SCREEN_ROWS,
+                ),
+                _ => Default::default(),
+            };
+            crate::flow::view::home(&header, &map, width, &expanded)
         }
     };
     Ok(crate::flow::view::text(&rows))
