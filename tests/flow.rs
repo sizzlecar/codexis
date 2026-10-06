@@ -286,6 +286,14 @@ class Store:
             self.items[key] = True
 
 
+class NotFound(LookupError):
+    pass
+
+
+class Missing(NotFound):
+    pass
+
+
 class Service:
     def __init__(self, store: Store = None):
         self.store = store
@@ -293,9 +301,16 @@ class Service:
     def create(self, key: str):
         if not key:
             raise HTTPException(status_code=400, detail="missing_key")
+        if key == "gone":
+            raise Missing(key)
         self.store.save(key)
         return key
 "#,
+    );
+    write(
+        root.path(),
+        "app/errors.py",
+        "from app.service import NotFound\n\n\ndef install(app):\n    mappings = {NotFound: (404, \"not_found\", \"Not found\")}\n    return mappings\n",
     );
     write(
         root.path(),
@@ -338,10 +353,10 @@ def health():
     assert_eq!(map["trunk"]["label"], "api.create");
     let create = step(&map, "Service.create");
     let found = exits(create);
-    assert!(
-        found.contains(&"400 missing_key".into()) && found.contains(&"409 store_full".into()),
-        "{found:?}"
-    );
+    // A subclass of an exception mapped in a dictionary is an exit too.
+    for expected in ["400 missing_key", "409 store_full", "404 not_found"] {
+        assert!(found.contains(&expected.into()), "{expected}: {found:?}");
+    }
     let max_items = map["config"]
         .as_array()
         .unwrap()

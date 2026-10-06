@@ -479,7 +479,7 @@ fn trunk(map: &FlowMap, width: usize, rows: &mut Vec<Row>) {
     let exit_column = width.saturating_sub(exits_width);
     let location_width = 20;
     let label_width = exit_column.saturating_sub(location_width + 2).max(24);
-    let title = if trunk.routes > 0 {
+    let mut title = if trunk.routes > 0 {
         crate::localize!(
             "主干  {} · {} 个入口",
             "Trunk {} · {} entries",
@@ -489,6 +489,14 @@ fn trunk(map: &FlowMap, width: usize, rows: &mut Vec<Row>) {
     } else {
         crate::localize!("主干  {}", "Trunk {}", trunk.label)
     };
+    // When entries do not share a handler, say how this one was chosen.
+    if trunk.routes <= 1 && map.trunks.len() >= 3 {
+        title.push_str(&crate::localize!(
+            "（{} 个处理函数中可达函数最多的；r 看其他）",
+            " (most reaching of {} handlers; r for others)",
+            map.trunks.len() + 1
+        ));
+    }
     let mut heading = pad(&title, exit_column);
     if exits_width > 0 {
         heading.push_str(crate::localize!("可能的提前结束", "Early exits"));

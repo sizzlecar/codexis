@@ -111,9 +111,28 @@ pub(super) fn program(index: &Index, nodes: &[Node]) -> Result<Program> {
     let results = crate::frontend::parallel_map(&contents, |(path, hash, content, nodes)| {
         Ok(world.file(path, hash, content, nodes))
     })?;
-    let mut functions = HashMap::new();
-    for result in results {
-        functions.extend(result);
+    let mut functions: HashMap<String, Function> = HashMap::new();
+    let mut statuses: HashMap<String, ExitCode> = HashMap::new();
+    for (file_functions, file_statuses) in results {
+        functions.extend(file_functions);
+        for (class, status) in file_statuses {
+            statuses.entry(class).or_insert(status);
+        }
+    }
+    // A raised exception class (or a subclass) mapped to a status is an exit.
+    for function in functions.values_mut() {
+        function.events.retain_mut(|event| {
+            let EventKind::Construct { owner, .. } = &event.kind else {
+                return true;
+            };
+            match world.mapped_status(owner, &statuses) {
+                Some((status, code)) => {
+                    event.kind = EventKind::Exit { status, code };
+                    true
+                }
+                None => false,
+            }
+        });
     }
     let mut routes = Vec::new();
     for node in nodes.iter().filter(|n| n.kind == "function") {
@@ -425,6 +444,23 @@ impl<'a> World<'a> {
         None
     }
 
+    fn mapped_status(&self, class: &str, statuses: &HashMap<String, ExitCode>) -> Option<ExitCode> {
+        let mut current = Some(class.to_owned());
+        for _ in 0..6 {
+            let name = current.take()?;
+            if let Some(found) = statuses.get(&name) {
+                return Some(found.clone());
+            }
+            let node = self.classes.get(&name)?;
+            let bases = node.signature.split_once('(')?.1.split(')').next()?;
+            let module = name.rsplit_once('.').map_or("", |(m, _)| m);
+            current = annotation_names(bases)
+                .into_iter()
+                .find_map(|base| self.class(&base, module, &[]));
+        }
+        None
+    }
+
     fn label(&self, node: &Node) -> String {
         match node.parent.as_deref().and_then(|p| self.by_id.get(p)) {
             Some(parent) if parent.kind == "type" => format!("{}.{}", parent.name, node.name),
@@ -598,7 +634,68 @@ impl<'a> World<'a> {
         Ty::Unknown
     }
 
+    fn is_protocol(&self, class: &str) -> bool {
+        self.classes.get(class).is_some_and(|node| {
+            node.signature.split_once('(').is_some_and(|(_, bases)| {
+                bases.split(')').next().unwrap_or("").contains("Protocol")
+            })
+        })
+    }
+
+    /// Parameter names after `self`, for structural matching.
+    fn parameter_names(node: &Node) -> Vec<String> {
+        let raw = node.attributes.get("parameters").map_or("", String::as_str);
+        raw.trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .split(',')
+            .filter_map(|part| {
+                let name = part
+                    .split([':', '='])
+                    .next()?
+                    .trim()
+                    .trim_start_matches('*');
+                (!name.is_empty() && name != "self" && name != "cls").then(|| name.to_owned())
+            })
+            .collect()
+    }
+
+    /// Classes that implement every method of a Protocol with the same
+    /// parameter names (typing.Protocol's structural conformance).
+    fn implementations(&self, protocol: &str, name: &str) -> Vec<String> {
+        let Some(required) = self.methods.get(protocol) else {
+            return vec![];
+        };
+        let mut found = Vec::new();
+        for (class, methods) in &self.methods {
+            if class == protocol || self.is_protocol(class) {
+                continue;
+            }
+            let conforms = required.iter().all(|wanted| {
+                methods.iter().any(|m| {
+                    m.name == wanted.name
+                        && Self::parameter_names(m) == Self::parameter_names(wanted)
+                })
+            });
+            if conforms {
+                if let Some(method) = methods.iter().find(|m| m.name == name) {
+                    found.push(method.id.clone());
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
     fn method(&self, class: &str, name: &str) -> Target {
+        if self.is_protocol(class) {
+            let mut found = self.implementations(class, name);
+            return match found.len() {
+                0 => Target::Unknown,
+                1 => Target::Function(found.remove(0)),
+                _ => Target::Dispatch(found),
+            };
+        }
         let mut current = Some(class.to_owned());
         let mut depth = 0;
         while let Some(class_name) = current.take() {
@@ -653,27 +750,22 @@ impl<'a> World<'a> {
             .unwrap_or(Ty::Unknown)
     }
 
-    fn file(
-        &self,
-        path: &str,
-        hash: &str,
-        content: &str,
-        nodes: &[&'a Node],
-    ) -> Vec<(String, Function)> {
+    fn file(&self, path: &str, hash: &str, content: &str, nodes: &[&'a Node]) -> FileResult {
         let mut parser = Parser::new();
         if parser
             .set_language(&tree_sitter_python::LANGUAGE.into())
             .is_err()
         {
-            return vec![];
+            return (vec![], vec![]);
         }
         let Some(tree) = parser.parse(content, None) else {
-            return vec![];
+            return (vec![], vec![]);
         };
         let root = tree.root_node();
         let module = self.module_of_path.get(path).cloned().unwrap_or_default();
         let imports = imports(root, content, &module, path);
         let mut output = Vec::new();
+        let mut statuses = Vec::new();
         for node in nodes {
             let Some(syntax) = root
                 .descendant_for_byte_range(node.evidence.start_byte, node.evidence.end_byte)
@@ -701,11 +793,14 @@ impl<'a> World<'a> {
                 locals: Vec::new(),
                 guards: Vec::new(),
                 events: Vec::new(),
+                statuses: Vec::new(),
+                status_locals: Vec::new(),
             };
             if let Some(parameters) = syntax.child_by_field_name("parameters") {
                 walker.parameters(parameters);
             }
             walker.walk(body);
+            statuses.extend(walker.statuses);
             let mut events = walker.events;
             events.sort_by_key(|e| (e.at, e.end));
             output.push((
@@ -723,7 +818,7 @@ impl<'a> World<'a> {
                 },
             ));
         }
-        output
+        (output, statuses)
     }
 }
 
@@ -873,6 +968,10 @@ fn imports(root: Syntax<'_>, content: &str, module: &str, path: &str) -> Vec<(St
     output
 }
 
+/// An error status and its machine-readable code.
+type ExitCode = (String, Option<String>);
+type FileResult = (Vec<(String, Function)>, Vec<(String, ExitCode)>);
+
 struct Walker<'w, 'a> {
     world: &'w World<'a>,
     path: &'w str,
@@ -884,6 +983,11 @@ struct Walker<'w, 'a> {
     locals: Vec<(String, Ty, Origin)>,
     guards: Vec<(String, usize, Evidence)>,
     events: Vec<Event>,
+    /// Exception classes mapped to statuses in dictionaries such as
+    /// `{NotFound: (404, "not_found", ..)}`.
+    statuses: Vec<(String, ExitCode)>,
+    /// Locals assigned only error status literals (`status = 409 if .. else 503`).
+    status_locals: Vec<(String, String)>,
 }
 
 impl Walker<'_, '_> {
@@ -979,7 +1083,72 @@ impl Walker<'_, '_> {
 
     fn walk(&mut self, syntax: Syntax<'_>) -> (Ty, Origin) {
         match syntax.kind() {
-            "function_definition" | "class_definition" | "decorated_definition" | "comment" => {
+            // Nested functions (stream generators, callbacks) run on behalf of
+            // the enclosing function; their calls belong to its flow.
+            "function_definition" => {
+                let mark = self.locals.len();
+                if let Some(parameters) = syntax.child_by_field_name("parameters") {
+                    for parameter in named(parameters) {
+                        let name = parameter.child_by_field_name("name").unwrap_or(parameter);
+                        self.locals.push((
+                            text(name, self.content).to_owned(),
+                            Ty::Unknown,
+                            Origin::Held,
+                        ));
+                    }
+                }
+                if let Some(body) = syntax.child_by_field_name("body") {
+                    self.walk(body);
+                }
+                self.locals.truncate(mark);
+                (Ty::Unknown, Origin::Held)
+            }
+            "decorated_definition" => {
+                if let Some(definition) = syntax.child_by_field_name("definition") {
+                    if definition.kind() == "function_definition" {
+                        self.walk(definition);
+                    }
+                }
+                (Ty::Unknown, Origin::Held)
+            }
+            "class_definition" | "comment" => (Ty::Unknown, Origin::Held),
+            "dictionary" => {
+                for pair in named(syntax) {
+                    if pair.kind() == "pair" {
+                        if let (Some(key), Some(value)) = (
+                            pair.child_by_field_name("key"),
+                            pair.child_by_field_name("value"),
+                        ) {
+                            self.mapping(key, value);
+                        }
+                    }
+                }
+                for child in named(syntax) {
+                    self.walk(child);
+                }
+                (Ty::Unknown, Origin::Held)
+            }
+            "raise_statement" => {
+                if let Some(raised) = named(syntax).first().copied() {
+                    let callee = if raised.kind() == "call" {
+                        raised.child_by_field_name("function")
+                    } else {
+                        Some(raised)
+                    };
+                    if let Some(class) = callee.and_then(|c| self.exception_class(c)) {
+                        self.push(
+                            syntax,
+                            syntax,
+                            EventKind::Construct {
+                                owner: class,
+                                variant: String::new(),
+                            },
+                        );
+                    }
+                }
+                for child in named(syntax) {
+                    self.walk(child);
+                }
                 (Ty::Unknown, Origin::Held)
             }
             "identifier" => {
@@ -1011,6 +1180,25 @@ impl Walker<'_, '_> {
                         .into_iter()
                         .find_map(|n| self.world.class(&n, &self.module, self.imports))
                 });
+                if let (Some(left), Some(right)) = (
+                    syntax.child_by_field_name("left"),
+                    syntax.child_by_field_name("right"),
+                ) {
+                    if left.kind() == "identifier"
+                        && matches!(
+                            right.kind(),
+                            "integer" | "conditional_expression" | "parenthesized_expression"
+                        )
+                    {
+                        let mut found = std::collections::BTreeSet::new();
+                        collect_statuses(right, self.content, &mut found);
+                        if !found.is_empty() {
+                            let joined: Vec<String> = found.iter().map(i64::to_string).collect();
+                            self.status_locals
+                                .push((text(left, self.content).to_owned(), joined.join("/")));
+                        }
+                    }
+                }
                 if let Some(left) = syntax.child_by_field_name("left") {
                     if left.kind() == "identifier" {
                         let ty = annotated.map(Ty::Class).unwrap_or(value.0);
@@ -1159,6 +1347,7 @@ impl Walker<'_, '_> {
                 return (Ty::Unknown, Origin::Held);
             }
         }
+        let mut dispatch_label: Option<String> = None;
         let (target, method_call, name) = match function.kind() {
             "attribute" => {
                 let method = function
@@ -1174,7 +1363,14 @@ impl Walker<'_, '_> {
                     None => Ty::Unknown,
                 };
                 let target = match receiver {
-                    Ty::Class(class) => self.world.method(&class, &method),
+                    Ty::Class(class) => {
+                        let target = self.world.method(&class, &method);
+                        if matches!(target, Target::Dispatch(_)) {
+                            let short = class.rsplit('.').next().unwrap_or(&class);
+                            dispatch_label = Some(format!("{short}.{method}"));
+                        }
+                        target
+                    }
                     Ty::Module(module) => {
                         let full = format!("{module}.{method}");
                         match (
@@ -1206,6 +1402,7 @@ impl Walker<'_, '_> {
                 .get(id.as_str())
                 .map(|n| self.world.label(n))
                 .unwrap_or_else(|| name.clone()),
+            Target::Dispatch(_) => dispatch_label.clone().unwrap_or_else(|| name.clone()),
             _ => compact(text(function, self.content), 48),
         };
         let anchor = match &target {
@@ -1237,6 +1434,39 @@ impl Walker<'_, '_> {
             ),
             _ => (Ty::Unknown, Origin::Accessor),
         }
+    }
+
+    /// `{NotFound: (404, "not_found", "..")}` maps an exception class.
+    fn mapping(&mut self, key: Syntax<'_>, value: Syntax<'_>) {
+        let Some(class) = self.exception_class(key) else {
+            return;
+        };
+        if value.kind() != "tuple" {
+            return;
+        }
+        let parts = named(value);
+        let status = parts
+            .iter()
+            .find(|p| p.kind() == "integer")
+            .and_then(|p| status_value(text(*p, self.content)));
+        if let Some(status) = status {
+            let code = parts
+                .iter()
+                .filter(|p| p.kind() == "string")
+                .map(|p| string_value(text(*p, self.content)))
+                .find(|v| is_code(v));
+            self.statuses.push((class, (status, code)));
+        }
+    }
+
+    /// A project class named by an identifier or `module.Class` attribute.
+    fn exception_class(&self, syntax: Syntax<'_>) -> Option<String> {
+        let name = text(syntax, self.content);
+        let last = name.rsplit('.').next().unwrap_or(name);
+        if !last.starts_with(|c: char| c.is_ascii_uppercase()) {
+            return None;
+        }
+        self.world.class(last, &self.module, self.imports)
     }
 
     fn constructor(&self, class: &str) -> Target {
@@ -1292,7 +1522,14 @@ impl Walker<'_, '_> {
                     };
                     match key {
                         "status_code" | "status" => {
-                            status = status_value(text(value, self.content))
+                            let raw = text(value, self.content);
+                            status = status_value(raw).or_else(|| {
+                                self.status_locals
+                                    .iter()
+                                    .rev()
+                                    .find(|(local, _)| local == raw)
+                                    .map(|(_, statuses)| statuses.clone())
+                            })
                         }
                         "detail" | "code" | "error" | "error_code" | "message" => {
                             if value.kind() == "string" {
@@ -1303,6 +1540,17 @@ impl Walker<'_, '_> {
                             }
                         }
                         _ => {}
+                    }
+                }
+                "identifier" if position == 0 => {
+                    let name = text(argument, self.content);
+                    if let Some((_, statuses)) = self
+                        .status_locals
+                        .iter()
+                        .rev()
+                        .find(|(local, _)| local == name)
+                    {
+                        status = status.or_else(|| Some(statuses.clone()));
                     }
                 }
                 "integer" | "attribute" if position == 0 => {
@@ -1326,6 +1574,24 @@ impl Walker<'_, '_> {
         }
         let status = status?;
         Some((status, code.or_else(|| strings.pop())))
+    }
+}
+
+fn collect_statuses(
+    syntax: Syntax<'_>,
+    content: &str,
+    output: &mut std::collections::BTreeSet<i64>,
+) {
+    if syntax.kind() == "integer" {
+        if let Ok(value) = text(syntax, content).parse::<i64>() {
+            if is_status(value) {
+                output.insert(value);
+            }
+        }
+        return;
+    }
+    for child in named(syntax) {
+        collect_statuses(child, content, output);
     }
 }
 

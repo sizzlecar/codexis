@@ -15,7 +15,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-pub const FLOW_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), ":flow:17");
+pub const FLOW_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), ":flow:23");
 const MAX_STEPS: usize = 64;
 const MAX_INLINE_DEPTH: usize = 5;
 const REACH_LIMIT: usize = 400;
@@ -357,6 +357,26 @@ fn assemble(snapshot: &Snapshot, program: Program) -> FlowMap {
         candidates.retain(|c| c.2 > 0);
     }
     candidates.sort_by(|a, b| (b.1, b.2, &a.0).cmp(&(a.1, a.2, &b.0)));
+    // Near ties (within 10% reach and the same entry count) go to the handler
+    // registered first, usually the primary route of a resource.
+    if let Some(&(_, routes, reach)) = candidates.first() {
+        let position = |id: &str| {
+            program
+                .functions
+                .get(id)
+                .map(|f| (f.evidence.path.clone(), f.evidence.start_byte))
+        };
+        let earliest = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.1 == routes && c.2 * 10 >= reach * 9)
+            .min_by_key(|(_, c)| position(&c.0))
+            .map(|(i, _)| i);
+        if let Some(index) = earliest {
+            let chosen = candidates.remove(index);
+            candidates.insert(0, chosen);
+        }
+    }
     let trunk = candidates.first().map(|(id, count, _)| {
         expander.expand(id, 0, false, None);
         let function = &program.functions[id];
@@ -667,22 +687,28 @@ impl<'a> Expander<'a> {
                 best = Some((id.clone(), size));
             }
         }
-        let (mut spine, mut size) = best?;
-        // Prefer a shared core: when the largest callee itself reaches a
-        // sibling doing most of the same work, that sibling is the trunk.
+        let (mut spine, _) = best?;
+        // Prefer a shared core: when the largest callee reaches a sibling and
+        // adds little beyond it (as a batch wrapper around the single path),
+        // the sibling is the trunk. A callee that merely checks something
+        // first keeps its own, larger work.
         loop {
             let set = self.reach_set(&spine).clone();
-            let next = callees
-                .iter()
-                .filter(|c| **c != spine && set.contains(*c))
-                .map(|c| (c.clone(), self.reach(c)))
-                .filter(|(_, s)| *s * 10 >= size * 6)
-                .max_by_key(|(_, s)| *s);
-            match next {
-                Some((id, s)) => {
-                    spine = id;
-                    size = s;
+            let mut next = None;
+            for candidate in callees.iter().filter(|c| **c != spine && set.contains(*c)) {
+                let inner = self.reach_set(candidate).clone();
+                let extra = set
+                    .iter()
+                    .filter(|f| *f != candidate && !inner.contains(*f))
+                    .count();
+                if extra * 5 <= set.len()
+                    && next.as_ref().is_none_or(|(_, size)| inner.len() > *size)
+                {
+                    next = Some((candidate.clone(), inner.len()));
                 }
+            }
+            match next {
+                Some((id, _)) => spine = id,
                 None => return Some(spine),
             }
         }
@@ -814,12 +840,46 @@ impl<'a> Expander<'a> {
             .into_iter()
             .collect();
         let others = callees.iter().filter(|c| self.reach(c) > 0).count();
+        let fresh: Vec<String> = callees
+            .iter()
+            .filter(|c| !self.visited.contains(*c))
+            .cloned()
+            .collect();
         let spine = if depth < MAX_INLINE_DEPTH {
-            self.choose_spine(&callees)
+            self.choose_spine(&fresh)
                 .filter(|_| depth < 2 || others <= 3)
         } else {
             None
         };
+        // Near the entry, a handler often prepares and then executes: every
+        // callee carrying a large share of the work is expanded, unless one
+        // already reaches the other.
+        let mut spines: Vec<String> = spine.iter().cloned().collect();
+        // The handler itself and thin wrappers (at most two calls of their
+        // own) show their sequence in full; elsewhere a sibling is expanded
+        // only when it is not a repeat of the primary's work.
+        let wrapper = depth == 0 || others <= 2;
+        if let (Some(primary), true) = (&spine, depth < 3) {
+            let primary_reach = self.reach_set(primary).clone();
+            let threshold = (primary_reach.len() * 3 / 10).max(3);
+            for callee in &fresh {
+                if spines.contains(callee) || (!wrapper && primary_reach.contains(callee)) {
+                    continue;
+                }
+                if program.functions.get(callee).is_some_and(|f| f.sink) {
+                    continue;
+                }
+                let reach = self.reach_set(callee).clone();
+                let own = reach.iter().filter(|f| !primary_reach.contains(*f)).count();
+                if reach.len() >= threshold
+                    && (wrapper || (!reach.contains(primary) && own * 2 >= reach.len()))
+                {
+                    spines.push(callee.clone());
+                }
+            }
+        }
+        // A function expanded once is a plain step afterwards.
+        spines.retain(|s| !self.visited.contains(s));
         let entry = Step {
             kind: StepKind::Inline,
             depth,
@@ -859,7 +919,7 @@ impl<'a> Expander<'a> {
         items.extend(guards.keys().map(|start| (*start, Item::Guard(*start))));
         items.sort_by_key(|(position, _)| *position);
         let mut opened: Vec<usize> = Vec::new();
-        let mut shown_spine = false;
+        let mut shown_spines: HashSet<String> = HashSet::new();
         let mut shown: HashSet<String> = HashSet::new();
         for (position, item) in items {
             let inside: Vec<usize> = loops
@@ -901,8 +961,10 @@ impl<'a> Expander<'a> {
             };
             let extra = attached.remove(&index).unwrap_or_default();
             let (kind, step_target, candidates, summary) = match target {
-                Target::Function(target) if spine.as_deref() == Some(target) && !shown_spine => {
-                    shown_spine = true;
+                Target::Function(target)
+                    if spines.contains(target) && !shown_spines.contains(target) =>
+                {
+                    shown_spines.insert(target.clone());
                     shown.insert(target.clone());
                     self.open_loops(&loops, &inside, &mut opened, depth, in_loop);
                     if self.steps.len() >= MAX_STEPS {
