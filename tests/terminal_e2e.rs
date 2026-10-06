@@ -220,97 +220,88 @@ fn write(root: &Path, path: &str, text: &str) {
 
 fn assert_simple_home(session: &TerminalSession, en: bool) {
     let screen = session.screen_text();
-    for entry in if en {
-        ["Understand the project", "Review changes"]
+    for shown in if en {
+        [
+            "Static analysis · no model",
+            "Trunk",
+            "pty_workbench::main",
+            "External systems",
+        ]
     } else {
-        ["理解项目", "查看改动"]
+        [
+            "静态分析 · 不调用模型",
+            "主干",
+            "pty_workbench::main",
+            "外部系统",
+        ]
     } {
         assert!(
-            screen.contains(entry),
-            "Home is missing its task {entry:?}: {screen}"
+            screen.contains(shown),
+            "Flow home is missing {shown:?}: {screen}"
         );
     }
     for hidden in [
         "阅读记录",
         "Reading notes",
-        "入口与调用",
-        "Entries and calls",
         "八维视角",
         "Eight perspectives",
         "构建包与文件",
         "Build packages and files",
         "分析范围与状态",
         "Analysis scope and status",
-        "子系统",
-        "subsystems",
-        "已定位依赖",
-        "established dependency",
         "Snapshot:",
         "快照：",
         "对象：",
         "Object:",
         "问题：",
         "Question:",
-        "先选择对象",
-        "Select an object",
-        "d/1–8",
-        "d 维度",
-        "d Views",
-        "o 源码",
-        "o Source",
-        "/ 搜索",
-        "/ Search",
         "c 结论",
         "c Conclusion",
         "v 疑问",
         "v Question",
         "h 历史",
         "h History",
-        "Terminal workflow fixture",
-        "Executes one task",
     ] {
         assert!(!screen.contains(hidden), "Home leaked {hidden:?}: {screen}");
     }
-    assert!(
-        screen.contains("↑↓") && screen.contains("Enter") && screen.contains('?'),
-        "Home must expose basic navigation and help: {screen}"
-    );
+    for key in if en {
+        [
+            "Enter Source",
+            "e Errors",
+            "c Config",
+            "s State",
+            "v Changes",
+            "d Explore",
+        ]
+    } else {
+        [
+            "Enter 源码",
+            "e 错误码",
+            "c 配置",
+            "s 共享状态",
+            "v 查看改动",
+            "d 深入分析",
+        ]
+    } {
+        assert!(screen.contains(key), "Home must expose {key:?}: {screen}");
+    }
     assert!(screen.contains(if en { "q Exit" } else { "q 退出" }));
 }
 
 fn open_explore(session: &mut TerminalSession, en: bool) {
     let quit = if en { "q Exit" } else { "q 退出" };
     session.keys(
-        "\r",
-        &[
-            if en {
-                "Business baseline not yet formed"
-            } else {
-                "业务认知基线尚未形成"
-            },
-            quit,
-        ],
-    );
-    // Selection clamps at the last item; this route is independent of the
-    // number of source reading candidates in a structural evidence packet.
-    session.keys(
-        &"j".repeat(24),
-        &[
-            if en {
-                "› Explore further"
-            } else {
-                "› 深入分析"
-            },
-            quit,
-        ],
-    );
-    session.keys(
-        "\r",
+        "d",
         &[
             if en {
                 "Explore further"
             } else {
                 "深入分析"
+            },
+            if en {
+                "Project explanation"
+            } else {
+                "项目解释"
             },
             if en {
                 "Entries and calls"
@@ -336,6 +327,18 @@ fn open_explore(session: &mut TerminalSession, en: bool) {
             quit,
         ],
     );
+    // The explanation is first; later steps start from the entries item.
+    session.keys(
+        "j",
+        &[
+            if en {
+                "› Entries and calls"
+            } else {
+                "› 入口与调用"
+            },
+            quit,
+        ],
+    );
 }
 
 #[test]
@@ -356,11 +359,7 @@ fn chinese_and_english_workbenches_link_objects_source_and_knowledge_history() {
             "# PTY workbench\n\nExecutes one task through src/engine.rs.\n",
         );
         let en = locale == "en";
-        let home = if en {
-            "Understand the project"
-        } else {
-            "理解项目"
-        };
+        let home = if en { "Trunk" } else { "主干" };
         let quit = if en { "q Exit" } else { "q 退出" };
         let dimensions = if en {
             [
@@ -386,71 +385,64 @@ fn chinese_and_english_workbenches_link_objects_source_and_knowledge_history() {
             ]
         };
         let mut session = TerminalSession::launch(project.path(), cache.path(), locale);
-        session.wait_for(
-            0,
-            &[home, if en { "Review changes" } else { "查看改动" }, quit],
-        );
+        session.wait_for(0, &[home, "pty_workbench::main", quit]);
         assert_simple_home(&session, en);
-        // Down clamps to the second task, then one Up returns to the first.
-        // This verifies the actual menu has exactly two entries even when a
-        // brief introduction repeats a task's name.
+        // A trunk line opens pinned source; back returns to the map.
         session.keys(
-            "jjj",
+            "j\r",
             &[
                 if en {
-                    "› Review changes"
+                    "Source · src/main.rs"
                 } else {
-                    "› 查看改动"
+                    "源码 · src/main.rs"
                 },
+                "engine::process();",
                 quit,
             ],
         );
-        session.keys(
-            "k",
-            &[
-                if en {
-                    "› Understand the project"
-                } else {
-                    "› 理解项目"
-                },
-                quit,
-            ],
-        );
+        session.keys("b", &[home, quit]);
+        for (key, title) in if en {
+            [
+                ("e", "Error codes"),
+                ("c", "Configuration"),
+                ("s", "Shared state"),
+                ("r", "Entries and trunks"),
+            ]
+        } else {
+            [
+                ("e", "错误码"),
+                ("c", "配置项"),
+                ("s", "共享状态"),
+                ("r", "入口与主干"),
+            ]
+        } {
+            session.keys(
+                key,
+                &[title, if en { "g Flow map" } else { "g 脉络图" }, quit],
+            );
+            session.keys("b", &[home, quit]);
+        }
         session.keys(
             "?",
             &[
                 if en { "Keyboard help" } else { "操作说明" },
                 if en {
-                    "Choose a task"
+                    "Every error exit"
                 } else {
-                    "选择要做的事"
+                    "全部错误出口"
                 },
                 if en {
-                    "Open the selected task"
+                    "Call order is source order"
                 } else {
-                    "打开所选入口"
+                    "调用顺序是源码顺序"
                 },
                 quit,
             ],
         );
-        let help = session.screen_text();
-        for advanced in [
-            "Switch perspectives",
-            "切换八维视角",
-            "Save a conclusion",
-            "保存认知结论",
-            "View current knowledge record history",
-            "查看当前认知记录历史",
-        ] {
-            assert!(
-                !help.contains(advanced),
-                "Home help should focus on choosing a task: {help}"
-            );
-        }
         session.keys("b", &[home, quit]);
         assert_simple_home(&session, en);
         session.keys(
-            "j\r",
+            "v",
             &[
                 if en {
                     "Change batch · Select scope"
@@ -710,7 +702,8 @@ fn generated_baseline_leads_from_business_steps_to_snapshot_source() {
         .unwrap()
         .is_empty());
     let mut session = TerminalSession::launch(project, cache, "zh-CN");
-    session.wait_for(0, &["理解项目", "查看改动", "q 退出"]);
+    session.wait_for(0, &["主干", "v 查看改动", "q 退出"]);
+    session.keys("d", &["深入分析", "项目解释"]);
     session.keys("\r", &["项目如何工作", "代表场景", "关键状态", "重要边界"]);
     session.keys("\r", &["负责什么", "交付什么", "证据 1"]);
     session.keys("\r", &["源码 ·", "q 退出"]);

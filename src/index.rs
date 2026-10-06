@@ -256,6 +256,34 @@ impl Index {
         )
     }
 
+    /// Nodes of the given kinds only; avoids materializing variants, values
+    /// and macros for whole-project passes that do not use them.
+    pub fn nodes_of_kinds(
+        &self,
+        snapshot: &str,
+        kinds: &[&str],
+        trim: impl Fn(&mut Node) -> bool,
+    ) -> Result<Vec<Node>> {
+        let placeholders = vec!["?"; kinds.len()].join(",");
+        let sql = format!(
+            "SELECT data FROM nodes WHERE snapshot=?1 AND kind IN ({placeholders}) ORDER BY path,start,id"
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let mut values: Vec<&dyn rusqlite::ToSql> = vec![&snapshot];
+        for kind in kinds {
+            values.push(kind);
+        }
+        let rows = statement.query_map(values.as_slice(), |r| r.get::<_, String>(0))?;
+        let mut output = Vec::new();
+        for row in rows {
+            let mut node: Node = serde_json::from_str(&row?)?;
+            if trim(&mut node) {
+                output.push(node);
+            }
+        }
+        Ok(output)
+    }
+
     pub fn all_edges(&self, snapshot: &str) -> Result<Vec<Edge>> {
         self.read_json_rows(
             "SELECT data FROM edges WHERE snapshot=?1 ORDER BY source,id",

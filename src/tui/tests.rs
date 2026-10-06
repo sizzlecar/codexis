@@ -43,30 +43,45 @@ fn browser(index: &Index, snapshot: Snapshot) -> Browser<'_> {
 }
 
 #[test]
-fn overview_navigation_keeps_selection_and_hides_debug_data() {
+fn flow_home_opens_source_and_keeps_explore_reachable() {
     let (_root, _cache, index, snapshot) = fixture();
     let mut ui = browser(&index, snapshot.clone());
-    assert_eq!(ui.page.items.len(), 2);
+    assert_eq!(ui.page.title, "脉络图");
     assert!(ui.detail.is_empty());
-    assert!(ui.home_summary().contains("理解项目"));
-    assert!(!ui.detail.join("\n").contains(&snapshot.id));
+    assert!(ui
+        .page
+        .rows
+        .iter()
+        .any(|r| r.text.contains("browser_demo::main")));
+    assert!(!ui.page.rows.iter().any(|r| r.text.contains(&snapshot.id)));
+    assert!(
+        ui.page.items.len() >= 2,
+        "rows with source positions are selectable"
+    );
+    assert_eq!(ui.page.items.len(), ui.page.row_items.len());
     ui.select(1).unwrap();
+    ui.enter().unwrap();
+    assert!(ui.page.title.starts_with("源码"));
+    ui.back().unwrap();
+    assert_eq!(ui.page.title, "脉络图");
+    assert_eq!(ui.page.selected, 1);
     ui.open(Action::Explore).unwrap();
+    assert!(ui.page.items[0].label.contains("项目解释"));
+    ui.select(1).unwrap();
     ui.enter().unwrap();
     assert_eq!(ui.page.title, "入口与调用");
     assert_eq!(ui.page.items.len(), 1, "exclude example/build entry points");
     ui.enter().unwrap();
     assert!(ui.page.title.ends_with("::main"));
     assert!(ui.detail.iter().any(|l| l.contains("greet();")));
-    ui.enter().unwrap();
-    assert!(ui.page.title.starts_with("源码"));
-    ui.back().unwrap();
     ui.back().unwrap();
     ui.back().unwrap();
     assert_eq!(ui.page.title, "深入分析");
+    ui.open(Action::FlowView("errors".into())).unwrap();
+    assert_eq!(ui.page.title, "错误码");
     ui.back().unwrap();
-    assert_eq!(ui.page.title, "项目");
-    assert_eq!(ui.page.selected, 1);
+    ui.back().unwrap();
+    assert_eq!(ui.page.title, "脉络图");
 }
 
 #[test]

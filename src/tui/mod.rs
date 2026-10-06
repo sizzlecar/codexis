@@ -158,7 +158,9 @@ pub fn run(index: &Index, snapshot: Snapshot, guide: Value, cache: Option<PathBu
             }
             match event::read()? {
                 Event::Resize(_, _) => {
-                    if browser.wraps_prose() {
+                    if browser.on_flow() {
+                        browser.refresh()?;
+                    } else if browser.wraps_prose() {
                         browser.preview()?;
                     }
                     dirty = true;
@@ -243,6 +245,27 @@ pub fn run(index: &Index, snapshot: Snapshot, guide: Value, cache: Option<PathBu
                     }
                     if key.code == KeyCode::Char('q') {
                         break;
+                    }
+                    if browser.on_flow() {
+                        let action = match key.code {
+                            KeyCode::Char('e') => Some(Action::FlowView("errors".into())),
+                            KeyCode::Char('c') => Some(Action::FlowView("config".into())),
+                            KeyCode::Char('s') => Some(Action::FlowView("state".into())),
+                            KeyCode::Char('r') => Some(Action::FlowView("trunks".into())),
+                            KeyCode::Char('v') => Some(browser.review_action()),
+                            KeyCode::Char('d') => Some(Action::Explore),
+                            _ => None,
+                        };
+                        if let Some(action) = action {
+                            if let Err(error) = browser.open(action) {
+                                browser.status = crate::localize!(
+                                    "无法打开：{error:#}",
+                                    "Cannot open: {error:#}",
+                                    error = error
+                                );
+                            }
+                            continue;
+                        }
                     }
                     if key.code == KeyCode::Char('/') {
                         input = Some(Input::Search(String::new()));
@@ -352,6 +375,10 @@ fn handle_key(browser: &mut Browser<'_>, key: KeyEvent) -> Result<Option<jobs::R
         }
         KeyCode::Up | KeyCode::Char('k') => browser.select(-1)?,
         KeyCode::Down | KeyCode::Char('j') => browser.select(1)?,
+        KeyCode::PageDown | KeyCode::Char(' ') if browser.on_flow() => {
+            browser.select(page as isize)?
+        }
+        KeyCode::PageUp if browser.on_flow() => browser.select(-(page as isize))?,
         KeyCode::Enter => return browser.enter(),
         KeyCode::Char(c @ '1'..='8') => {
             let dimension = crate::understanding::DIMENSION_IDS[(c as u8 - b'1') as usize];
@@ -417,23 +444,23 @@ fn handle_key(browser: &mut Browser<'_>, key: KeyEvent) -> Result<Option<jobs::R
             }
         }
         KeyCode::Char('?') => {
-            if matches!(browser.page.action, Action::Home) {
+            if browser.on_flow() {
                 browser.open(Action::Text {
                     title: crate::localize!("操作说明", "Keyboard help").into(),
                     lines: vec![
-                        crate::localize!("↑↓         选择要做的事", "↑↓         Choose a task")
-                            .into(),
-                        crate::localize!(
-                            "Enter      打开所选入口",
-                            "Enter      Open the selected task"
-                        )
-                        .into(),
-                        crate::localize!(
-                            "b / Esc    从这里返回首页",
-                            "b / Esc    Return to the home screen"
-                        )
-                        .into(),
-                        crate::localize!("q          退出", "q          Exit").into(),
+                        crate::localize!("↑↓ / j k  选择有源码位置的行", "↑↓ / j k  Select a line with a source position").into(),
+                        crate::localize!("Enter      打开所选行的固定快照源码", "Enter      Open pinned source for the selected line").into(),
+                        crate::localize!("e          全部错误出口（状态码与错误码）", "e          Every error exit (status and code)").into(),
+                        crate::localize!("c          配置项、读取位置与读取方式", "c          Configuration fields, read sites and read modes").into(),
+                        crate::localize!("s          共享状态与读写位置", "s          Shared state and access sites").into(),
+                        crate::localize!("r          全部入口与其他主干", "r          Every entry and other trunks").into(),
+                        crate::localize!("v          查看改动", "v          Review changes").into(),
+                        crate::localize!("d          深入分析：入口与调用、八维视角、项目解释等", "d          Explore further: calls, perspectives, project explanation").into(),
+                        crate::localize!("/          搜索名称或路径", "/          Search names or paths").into(),
+                        crate::localize!("b / Esc    返回；g 回到脉络图；q 退出", "b / Esc    Back; g returns to the flow map; q exits").into(),
+                        String::new(),
+                        crate::localize!("脉络图只来自源码：路由注册、按声明类型确定的调用、错误字面量、配置结构与依赖清单。", "The map comes only from source: route registrations, calls determined by declared types, error literals, configuration types and manifests.").into(),
+                        crate::localize!("调用顺序是源码顺序，不是一次真实运行的顺序；目标无法确定的调用会标明。", "Call order is source order, not a recorded run; calls whose targets cannot be determined are marked.").into(),
                     ],
                 })?;
                 return Ok(None);
@@ -491,8 +518,8 @@ fn draw(browser: &Browser<'_>, input: Option<&str>, progress: Option<&str>) -> R
         .file_name()
         .unwrap_or_default()
         .to_string_lossy();
-    if matches!(browser.page.action, Action::Home) {
-        draw_home(&mut out, browser, &name, (width, height), input, progress)?;
+    if browser.on_flow() {
+        draw_flow(&mut out, browser, (width, height), input, progress)?;
         out.flush()?;
         return Ok(());
     }
@@ -724,108 +751,75 @@ fn draw(browser: &Browser<'_>, input: Option<&str>, progress: Option<&str>) -> R
     Ok(())
 }
 
-fn draw_home(
+fn draw_flow(
     out: &mut impl Write,
     browser: &Browser<'_>,
-    name: &str,
     size: (u16, u16),
     input: Option<&str>,
     progress: Option<&str>,
 ) -> Result<()> {
+    use crate::flow::view::Tone;
     let (width, height) = size;
-    let block_width = width.saturating_sub(4).min(88);
-    let x = (width - block_width) / 2;
-    let top = height.saturating_sub(16) / 3;
-    line(
-        out,
-        x,
-        top,
-        block_width,
-        &format!("CODEXIS / {name}"),
-        Color::Cyan,
-        true,
-        0,
-    )?;
-    let summary = wrap_prose_lines(&[browser.home_summary()], usize::from(block_width));
-    for (row, text) in summary.iter().take(2).enumerate() {
-        let text = if row == 1 && summary.len() > 2 {
-            format!("{}…", clip(text, usize::from(block_width - 1), 0))
-        } else {
-            text.clone()
+    let body = usize::from(height.saturating_sub(4)).max(1);
+    let rows = &browser.page.rows;
+    let selected = browser.page.row_items.get(browser.page.selected).copied();
+    // Keep the selection visible with a little context below it.
+    let offset = match selected {
+        Some(row) if row + 3 > body => (row + 3 - body).min(rows.len().saturating_sub(body)),
+        _ => 0,
+    };
+    let title = if matches!(browser.page.action, Action::Home) {
+        0
+    } else {
+        line(
+            out,
+            1,
+            0,
+            width - 2,
+            &visible_breadcrumb(&browser.breadcrumb(), usize::from(width - 2)),
+            Color::Cyan,
+            false,
+            0,
+        )?;
+        1
+    };
+    for (position, row) in rows.iter().enumerate().skip(offset).take(body - title) {
+        let color = match row.tone {
+            Tone::Title | Tone::Accent => Color::Cyan,
+            Tone::Heading | Tone::Normal => Color::White,
+            Tone::Dim => Color::DarkGrey,
+            Tone::Exit => Color::Yellow,
         };
         line(
             out,
-            x,
-            top + 2 + row as u16,
-            block_width,
-            &text,
-            Color::Grey,
-            false,
-            0,
-        )?;
-    }
-    for (row, item) in browser.page.items.iter().enumerate() {
-        let selected = row == browser.page.selected;
-        let y = top + 6 + row as u16 * 3;
-        line(
-            out,
-            x,
-            y,
-            block_width,
-            &format!("{} {}", if selected { "›" } else { " " }, item.label),
-            if selected { Color::Cyan } else { Color::White },
-            selected,
-            0,
-        )?;
-        line(
-            out,
-            x + 2,
-            y + 1,
-            block_width - 2,
-            &item.hint,
-            Color::DarkGrey,
-            false,
-            0,
-        )?;
-    }
-    if browser.snapshot.completeness.stale || browser.snapshot.completeness.status != "complete" {
-        let warning = if browser.snapshot.completeness.stale {
-            crate::localize!(
-                "源码已变化，请重新打开项目。",
-                "Source changed; reopen the project."
-            )
-        } else {
-            crate::localize!(
-                "分析尚不完整；进入深入分析查看范围。",
-                "Analysis is partial; inspect scope in Explore further."
-            )
-        };
-        line(
-            out,
-            x,
-            height - 4,
-            block_width,
-            warning,
-            Color::Yellow,
-            false,
-            0,
+            1,
+            (title + position - offset) as u16,
+            width - 2,
+            &row.text,
+            color,
+            Some(position) == selected,
+            browser.page.horizontal,
         )?;
     }
     line(
         out,
-        x,
+        1,
         height - 3,
-        block_width,
+        width - 2,
         input.or(progress).unwrap_or(&browser.status),
-        Color::Yellow,
+        if input.is_some() {
+            Color::Cyan
+        } else {
+            Color::Yellow
+        },
         false,
         0,
     )?;
     line(
         out,
-        x,
+        1,
         height - 2,
-        block_width,
+        width - 2,
         page_shortcuts(browser),
         Color::DarkGrey,
         false,
@@ -838,8 +832,12 @@ fn draw_home(
 fn page_shortcuts(browser: &Browser<'_>) -> &'static str {
     match browser.page.action {
         Action::Home => crate::localize!(
-            "↑↓ 选择  Enter 打开  ? 帮助  q 退出",
-            "↑↓ Select  Enter Open  ? Help  q Exit"
+            "↑↓ 选行  Enter 源码  e 错误码  c 配置  s 共享状态  r 入口  v 查看改动  d 深入分析  / 搜索  ? 帮助  q 退出",
+            "↑↓ Select  Enter Source  e Errors  c Config  s State  r Entries  v Changes  d Explore  / Search  ? Help  q Exit"
+        ),
+        Action::FlowView(_) => crate::localize!(
+            "↑↓ 选行  Enter 源码  b 返回  g 脉络图  ? 帮助  q 退出",
+            "↑↓ Select  Enter Source  b Back  g Flow map  ? Help  q Exit"
         ),
         Action::Source(_) | Action::Diff { .. } | Action::Text { .. } => crate::localize!(
             "↑↓ 滚动  b 返回  ? 帮助  q 退出",

@@ -12,13 +12,36 @@ target/release/codexis analyze /path/to/project
 target/release/codexis --locale en analyze /path/to/project
 ```
 
-普通终端进入工作台。首页只保留“理解项目”和“查看改动”，展示一句项目说明。进入“理解项目”后可沿业务步骤阅读源码；“深入分析”提供入口与调用、八维视角、构建包与文件、阅读记录和分析范围。
+普通终端进入工作台，首屏是一张静态脉络图：入口（路由注册）、主干（从处理入口最多的函数出发，按源码顺序展开调用）、每一步可能的提前结束（状态码与错误码）、读取的配置、跨请求共享状态和外部系统。全部来自源码，不调用模型。调用目标只按声明类型确定（参数、字段、带类型或构造出来的局部变量、返回类型、`use`/`import`），确定不了的标为未确定；trait 或接口分派列出实现数量；调用顺序是源码顺序，不是一次真实运行的顺序。
 
-The home screen offers **Understand the project** and **Review changes**, with a short project description. Follow business steps into source, or choose **Explore further** for entries, eight perspectives, packages and files, reading notes, and analysis scope. Select an object and keep it in context while switching views.
+The terminal opens on a static flow map: entries (route registrations), the trunk (calls expanded in source order from the handler serving the most entries), early exits with status and code, configuration reads, shared state and external systems. Everything comes from source; no model is called. Call targets are resolved only through declared types (parameters, fields, typed or constructed locals, return types, `use`/`import`); anything else is marked unknown, trait or interface dispatch lists its implementations, and order is source order rather than a recorded run.
 
-认知基线以一个具体业务场景解释项目目的、协作步骤、关键状态、失败边界和首读理由。首次进入时，选择“用 Codex 生成项目解释”；只有结构索引时会明确提示基线尚未形成。每一步都可打开固定快照中的源码证据。
+```text
+shop-api  4f1c2d9  Rust · 3 packages · 120 files · 18420 lines              Static analysis · no model
+Entry POST /orders  /payments
+Trunk OrderHandler::handle · 2 entries                                     Early exits
+   1 Admission::admit  [cfg] limits                   handler.rs:41       → 429 too_busy
+      ⟳ for attempt in 0..policy.max_attempts         service.rs:88
+      │  4 BackendPool::select                        service.rs:93       → 503 no_backend
+      │  6 Ledger::reserve                            service.rs:120      → 503 ledger_full
+```
 
-The baseline explains one concrete scenario: purpose, collaborating steps, state ownership, failure boundaries, and where to read first. Choose **Generate a project explanation with Codex** in the workbench, or run:
+首屏按键：`↑↓` 选行，Enter 打开固定快照源码；`e` 全部错误出口，`c` 配置项及读取位置和读取方式（读取时取当前值 / 使用调用方传入的值 / 使用持有的值），`s` 共享状态及读写位置，`r` 全部入口与其他主干，`v` 查看改动，`d` 深入分析（入口与调用、八维视角、项目解释、构建包与文件、阅读记录和分析范围），`/` 搜索，`?` 帮助。
+
+Keys: `↑↓` select a line and Enter opens pinned source; `e` every error exit, `c` configuration with read sites and modes, `s` shared state with access sites, `r` every entry and other trunks, `v` review changes, `d` explore further (calls, eight perspectives, project explanation, packages, reading notes, scope), `/` search, `?` help.
+
+```sh
+codexis --project /path/to/project flow
+codexis --project /path/to/project flow --view errors|config|state|trunks
+```
+
+Rust 识别路由注册调用（含 `for (path, ..) in [..]` 循环注册和 `#[get("/x")]` 属性）、带状态码字面量或 `StatusCode::X` 的错误构造，以及在 `match` 中映射到状态码的错误枚举变体；配置根是源码中由 YAML/TOML/环境变量加载的 `Deserialize` 类型。Python 识别 FastAPI/Flask 风格装饰器（含 `APIRouter(prefix=…)`）、`HTTPException`/`abort` 等出口和 pydantic `BaseSettings` 配置。脉络图按快照缓存。
+
+Rust recognizes route registration calls (including loop-registered paths and `#[get("/x")]` attributes), error constructors carrying a status literal or `StatusCode::X`, and error enum variants mapped to statuses in a `match`; configuration roots are `Deserialize` types loaded from YAML/TOML/environment in source. Python recognizes FastAPI/Flask-style decorators (including `APIRouter(prefix=…)`), `HTTPException`/`abort` exits and pydantic `BaseSettings`. The map is cached per snapshot.
+
+认知基线以一个具体业务场景解释项目目的、协作步骤、关键状态、失败边界和首读理由，入口在“深入分析 → 项目解释”（`d`）。首次进入时，选择“用 Codex 生成项目解释”；只有结构索引时会明确提示基线尚未形成。每一步都可打开固定快照中的源码证据。
+
+The baseline explains one concrete scenario: purpose, collaborating steps, state ownership, failure boundaries, and where to read first. Open it from **Explore further → Project explanation** (`d`) and choose **Generate a project explanation with Codex**, or run:
 
 ```sh
 codexis --project /path/to/project baseline --generate --timeout-secs 300
@@ -28,9 +51,9 @@ codexis --locale en --project /path/to/project baseline --generate
 
 Explanation generation uses an installed, authenticated `codex` CLI and its model service, explicitly on request. `--model` selects a model; `CODEXIS_CODEX_BIN` selects the executable. Codex reads an isolated copy of admitted source, README, and manifests from the stored snapshot. Runtime data, credentials configuration, planning documents, and project instructions are excluded. Explanations retain source/declaration/interpretation labels and line citations, remain separate from human-confirmed knowledge, and are cached by snapshot, locale, provider and context. Generation can take a few minutes; cancel or timeout preserves the previous valid result.
 
-首页用 `↑↓` 选择、Enter 打开、`q` 退出；`?` 查看当前页面的帮助。深入页面保留 `b` 返回、`g` 回主页、`/` 搜索、`o` 看源码、`d` / `1–8` 切换视角、`c/v` 保存结论或疑问等操作，底部只提示当前页面常用按键。深入页面在宽终端左右布局，窄终端上下布局。
+深入页面保留 `b` 返回、`g` 回主页、`/` 搜索、`o` 看源码、`d` / `1–8` 切换视角、`c/v` 保存结论或疑问等操作，底部只提示当前页面常用按键。深入页面在宽终端左右布局，窄终端上下布局。
 
-`--locale zh-CN|en` controls system text, with Chinese as the default. `CODEXIS_LOCALE` provides an environment default. Source, documentation excerpts, and user notes retain their original language. Pipes, redirects, `--plain`, and exports use noninteractive reports.
+`--locale zh-CN|en` controls system text, with Chinese as the default. `CODEXIS_LOCALE` provides an environment default. Source, documentation excerpts, and user notes retain their original language. Pipes, redirects, `--plain`, and exports use noninteractive reports; the plain `analyze` report prints the flow map, and `--verbose` prints the detailed overview.
 
 ## Query and review / 查询与审阅
 

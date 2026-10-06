@@ -54,16 +54,12 @@ fn one_command_shows_reading_guide_without_debug_wall() {
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
     for needed in [
-        "项目概览",
-        "模块组成",
-        "从这里开始读",
-        "内部依赖",
-        "Command line application",
-        "Shared execution primitives",
-        "app/src/main.rs:1",
-        "reader-app → reader-core",
-        "声明依赖",
+        "静态分析 · 不调用模型",
+        "主干  reader_app::main",
+        "src/main.rs:1",
+        "外部系统",
         "--verbose",
+        "codexis flow --view",
     ] {
         assert!(text.contains(needed), "missing {needed}\n{text}");
     }
@@ -127,11 +123,7 @@ fn library_project_has_a_source_start_without_a_main_function() {
     let output = cli(root.path(), cache.path(), &[]);
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        text.contains("从这里开始读") && text.contains("src/lib.rs:1"),
-        "{text}"
-    );
-    assert!(text.contains("库入口"));
+    assert!(text.contains("库入口 src/lib.rs"), "{text}");
     assert!(!text.contains("<symbol>"));
 }
 

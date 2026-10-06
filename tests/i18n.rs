@@ -126,9 +126,30 @@ fn both_locales_cover_cli_reports_and_preserve_source_and_human_content() {
             .to_string()
             .contains("原始模块说明 Original module documentation"));
 
+        // The plain first screen is the flow map; the detailed overview stays
+        // available with --verbose.
         let compact = text(root.path(), cache.path(), locale, &["analyze", "--plain"]);
-        assert!(compact.contains(overview) && compact.contains(reading));
-        assert!(compact.contains("Original English project description"));
+        for label in if locale == "en" {
+            ["Static analysis · no model", "Trunk", "External systems"]
+        } else {
+            ["静态分析 · 不调用模型", "主干", "外部系统"]
+        } {
+            assert!(
+                compact.contains(label),
+                "{locale} flow map lacks {label:?}: {compact}"
+            );
+        }
+        assert!(compact.contains("用户原文 Preserve the original documentation."));
+        let detailed = text(
+            root.path(),
+            cache.path(),
+            locale,
+            &["analyze", "--plain", "--verbose"],
+        );
+        assert!(
+            detailed.contains(overview) || detailed.contains(reading),
+            "{detailed}"
+        );
         let inspection = text(
             root.path(),
             cache.path(),

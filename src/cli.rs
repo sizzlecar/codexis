@@ -87,6 +87,25 @@ impl Dimension {
     }
 }
 #[derive(Clone, Copy, ValueEnum)]
+enum FlowView {
+    Home,
+    Errors,
+    Config,
+    State,
+    Trunks,
+}
+impl FlowView {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Home => "home",
+            Self::Errors => "errors",
+            Self::Config => "config",
+            Self::State => "state",
+            Self::Trunks => "trunks",
+        }
+    }
+}
+#[derive(Clone, Copy, ValueEnum)]
 enum Level {
     Package,
     Module,
@@ -226,6 +245,11 @@ enum Command {
         #[command(flatten)]
         options: AnalysisOptions,
     },
+    /// Show the static flow map: entries, trunk, exits, configuration and shared state.
+    Flow {
+        #[arg(long, value_enum, default_value = "home")]
+        view: FlowView,
+    },
     /// Query package or module structure in a stored snapshot.
     Map {
         #[arg(long, value_enum, default_value = "package")]
@@ -361,6 +385,7 @@ fn localized_command(mut command: clap::Command) -> clap::Command {
         "analyze" => crate::localize!("读取项目源码、更新索引并生成项目总览", "Capture source, update the index and generate a project overview"),
         "baseline" => crate::localize!("阅读项目业务认知基线；可调用本机 Codex 阅读源码生成解释", "Read the project's business baseline; optionally use local Codex to read source and explain it"),
         "understand" => crate::localize!("从八个维度探索已保存的项目快照", "Explore the eight dimensions of project understanding in a stored snapshot"),
+        "flow" => crate::localize!("查看静态脉络图：入口、主干、错误出口、配置与共享状态", "Show the static flow map: entries, trunk, exits, configuration and shared state"),
         "map" => crate::localize!("查看包或模块的结构", "Query package or module structure in a stored snapshot"),
         "inspect" => crate::localize!("查找符号并核查已保存的源码证据", "Find a symbol and inspect stored source evidence"),
         "trace" => crate::localize!("沿调用关系探索有界路径与未知断点", "Explore a bounded neighborhood of call relationships"),
@@ -429,6 +454,7 @@ fn localized_command(mut command: clap::Command) -> clap::Command {
             "id" => crate::localize!("只查看指定认知记录", "Show this knowledge record"),
             "history" => crate::localize!("显示记录的修订历史", "Show the record revision history"),
             "level" => crate::localize!("按包或模块查看结构", "View structure by package or module"),
+            "view" => crate::localize!("脉络图视图：首屏、错误码、配置项、共享状态或其他主干", "Flow view: home, error codes, configuration, shared state or other trunks"),
             "limit" => crate::localize!("单次查询的最大结果数量", "Maximum results for this query"),
             "cursor" => crate::localize!("继续查询的位置", "Position from which to continue the query"),
             "direction" => crate::localize!("沿调用者或被调用者展开", "Expand callers or callees"),
@@ -693,6 +719,15 @@ fn execute(cli: &Cli) -> Result<(Report<Value>, i32)> {
         Command::Knowledge { id, history } => Report::new(
             &snapshot,
             serde_json::json!({"kind":"knowledge","records":crate::knowledge::list(&index,&snapshot,id.as_deref(),*history)?}),
+        ),
+        Command::Flow { view } => Report::new(
+            &snapshot,
+            serde_json::json!({
+                "kind": "flow",
+                "view": view.id(),
+                "header": crate::flow::view::Header::new(&snapshot),
+                "flow": crate::flow::build(&index, &snapshot)?,
+            }),
         ),
         Command::Map {
             level,

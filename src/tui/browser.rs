@@ -1,5 +1,10 @@
 use super::jobs::{Completed, Request};
 use crate::{
+    flow::{
+        self,
+        view::{Header, Row},
+        FlowMap,
+    },
     index::Index,
     knowledge, marks,
     model::{Edge, Evidence, Node, Report, Snapshot},
@@ -18,6 +23,8 @@ const PAGE_SIZE: usize = 100;
 #[derive(Clone, Debug)]
 pub(super) enum Action {
     Home,
+    /// A full-width flow list: errors, config, state or trunks.
+    FlowView(String),
     Baseline,
     Explore,
     Dimensions,
@@ -176,6 +183,9 @@ pub(super) struct Page {
     pub title: String,
     pub intro: Vec<String>,
     pub items: Vec<Item>,
+    /// Flow pages draw these rows; `row_items[i]` is the row of item `i`.
+    pub rows: Vec<Row>,
+    pub row_items: Vec<usize>,
     pub selected: usize,
     pub scroll: usize,
     pub horizontal: usize,
@@ -190,6 +200,8 @@ impl Page {
             title: title.into(),
             intro: vec![],
             items: vec![],
+            rows: vec![],
+            row_items: vec![],
             selected: 0,
             scroll: 0,
             horizontal: 0,
@@ -205,6 +217,8 @@ pub(super) struct Browser<'a> {
     guide: Value,
     baseline: Value,
     understanding: Value,
+    flow: Arc<FlowMap>,
+    header: Header,
     review: Option<Arc<Report<Value>>>,
     hashes: BTreeMap<String, String>,
     semantics: BTreeMap<String, Snapshot>,
@@ -222,12 +236,27 @@ impl<'a> Browser<'a> {
         let hashes = index.file_hashes(&snapshot.id)?;
         let understanding = query::understanding_data(index, &snapshot)?;
         let baseline = crate::interpretation::data(index, &snapshot, &understanding, &guide)?;
+        let mut status = String::new();
+        let flow = match flow::build(index, &snapshot) {
+            Ok(map) => map,
+            Err(error) => {
+                status = crate::localize!(
+                    "脉络图未能生成：{error:#}",
+                    "Flow map unavailable: {error:#}",
+                    error = error
+                );
+                FlowMap::default()
+            }
+        };
+        let header = Header::new(&snapshot).described(&baseline);
         let mut browser = Self {
             index,
             snapshot,
             guide,
             baseline,
             understanding,
+            flow: Arc::new(flow),
+            header,
             review: None,
             hashes,
             semantics: BTreeMap::new(),
@@ -237,7 +266,7 @@ impl<'a> Browser<'a> {
             question: String::new(),
             dimension: "architecture".into(),
             detail: vec![],
-            status: String::new(),
+            status,
         };
         browser.page = browser.build(Action::Home)?;
         browser.preview()?;
@@ -253,32 +282,32 @@ impl<'a> Browser<'a> {
             .join(" › ")
     }
 
-    pub(super) fn home_summary(&self) -> String {
-        if let Some(purpose) = self.baseline["explanation"]["purpose"]["text"]
-            .as_str()
-            .filter(|text| !text.trim().is_empty())
-        {
-            let purpose = purpose.trim();
-            let end = purpose
-                .char_indices()
-                .find_map(|(byte, ch)| {
-                    let end = byte + ch.len_utf8();
-                    let sentence_end = matches!(ch, '。' | '！' | '？')
-                        || (matches!(ch, '.' | '!' | '?')
-                            && purpose[end..]
-                                .chars()
-                                .next()
-                                .is_none_or(char::is_whitespace));
-                    sentence_end.then_some(end)
-                })
-                .unwrap_or(purpose.len());
-            return purpose[..end].into();
+    pub fn on_flow(&self) -> bool {
+        matches!(self.page.action, Action::Home | Action::FlowView(_))
+    }
+
+    /// The change review entry: the last comparison, or a choice of scope.
+    pub fn review_action(&self) -> Action {
+        self.review
+            .as_ref()
+            .map(|r| Action::Changes(r.clone()))
+            .unwrap_or(Action::ReviewMenu)
+    }
+
+    fn flow_rows(page: &mut Page, rows: Vec<Row>) {
+        for (position, row) in rows.iter().enumerate() {
+            if let Some(evidence) = &row.evidence {
+                page.row_items.push(position);
+                page.items.push(Item {
+                    label: row.text.trim().to_owned(),
+                    hint: format!("{}:{}", evidence.path, evidence.start_line),
+                    action: Action::Source(evidence.clone()),
+                    detail: vec![],
+                    evidence: Some(evidence.clone()),
+                });
+            }
         }
-        crate::localize!(
-            "还没有项目解释，进入「理解项目」开始。",
-            "No project explanation yet. Open ‘Understand the project’ to get started."
-        )
-        .into()
+        page.rows = rows;
     }
 
     pub fn open(&mut self, action: Action) -> Result<Option<Request>> {
@@ -1076,32 +1105,37 @@ impl<'a> Browser<'a> {
         let mut page = Page::new(action.clone(), "");
         match action {
             Action::Home => {
-                page.title = crate::localize!("项目", "Project").into();
-                page.items = vec![
-                    Item::new(
-                        crate::localize!("理解项目", "Understand the project"),
-                        crate::localize!(
-                            "了解目的、协作与关键代码。",
-                            "Understand its purpose, collaboration, and key code."
-                        ),
-                        Action::Baseline,
-                    ),
-                    Item::new(
-                        crate::localize!("查看改动", "Review changes"),
-                        crate::localize!(
-                            "查看改了什么以及相关源码。",
-                            "Read what changed and its related source."
-                        ),
-                        self.review
-                            .as_ref()
-                            .map(|r| Action::Changes(r.clone()))
-                            .unwrap_or(Action::ReviewMenu),
-                    ),
-                ];
+                page.title = crate::localize!("脉络图", "Flow map").into();
+                let rows = flow::view::home(&self.header, &self.flow, screen_width());
+                Self::flow_rows(&mut page, rows);
+            }
+            Action::FlowView(view) => {
+                page.title = match view.as_str() {
+                    "errors" => crate::localize!("错误码", "Error codes"),
+                    "config" => crate::localize!("配置项", "Configuration"),
+                    "state" => crate::localize!("共享状态", "Shared state"),
+                    _ => crate::localize!("入口与主干", "Entries and trunks"),
+                }
+                .into();
+                let rows = match view.as_str() {
+                    "errors" => flow::view::errors(&self.flow),
+                    "config" => flow::view::config(&self.flow),
+                    "state" => flow::view::state(&self.flow),
+                    _ => flow::view::trunks(&self.flow),
+                };
+                Self::flow_rows(&mut page, rows);
             }
             Action::Explore => {
                 page.title = crate::localize!("深入分析", "Explore further").into();
                 page.items = vec![
+                    Item::new(
+                        crate::localize!("项目解释", "Project explanation"),
+                        crate::localize!(
+                            "按需由本机 Codex 阅读源码生成，结论附引用。",
+                            "Generated on request by local Codex reading the source, with citations."
+                        ),
+                        Action::Baseline,
+                    ),
                     Item::new(
                         crate::localize!("入口与调用", "Entries and calls"),
                         crate::localize!(
@@ -2355,7 +2389,7 @@ impl<'a> Browser<'a> {
     }
 
     pub fn preview(&mut self) -> Result<()> {
-        if matches!(self.page.action, Action::Home) {
+        if self.on_flow() {
             self.detail.clear();
             return Ok(());
         }
@@ -2727,4 +2761,13 @@ fn change_reasons(value: &Value) -> Vec<String> {
             .into()
         })
         .collect()
+}
+
+/// Layout width for flow pages; tests and pipes use a fixed width.
+fn screen_width() -> usize {
+    crossterm::terminal::size()
+        .map(|(width, _)| usize::from(width))
+        .unwrap_or(112)
+        .saturating_sub(2)
+        .max(60)
 }

@@ -183,6 +183,9 @@ pub fn check_freshness(index: &Index, snapshot: &mut Snapshot) -> Result<()> {
 }
 
 pub fn overview(index: &Index, snapshot: &Snapshot) -> Result<Report<Value>> {
+    // Built first so its working set is released before the dimension data
+    // is materialized; a failure leaves the rest of the overview usable.
+    let flow = crate::flow::build(index, snapshot).ok();
     let mut statement = index.connection.prepare("SELECT data FROM nodes WHERE snapshot=?1 AND ((name='main' AND kind='function') OR json_extract(data,'$.attributes.entry_kind') IN ('python_main','python_script')) ORDER BY qualified,path")?;
     let rows = statement.query_map([&snapshot.id], |r| r.get::<_, String>(0))?;
     let mut entries = Vec::<Node>::new();
@@ -245,6 +248,13 @@ pub fn overview(index: &Index, snapshot: &Snapshot) -> Result<Report<Value>> {
         }),
     );
     report.completeness.truncated |= entry_points_total > 30 || payload_truncated(&report.data);
+    // The flow map is the default first screen.
+    if let Some(flow) = flow {
+        report.data["flow"] = serde_json::to_value(flow)?;
+        report.data["header"] = serde_json::to_value(
+            crate::flow::view::Header::new(snapshot).described(&report.data["baseline"]),
+        )?;
+    }
     Ok(report)
 }
 

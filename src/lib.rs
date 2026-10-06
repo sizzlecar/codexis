@@ -4,6 +4,7 @@ pub mod batch;
 pub mod cli;
 pub mod constraints;
 pub mod explanation;
+pub mod flow;
 pub mod frontend;
 pub mod i18n;
 pub mod index;

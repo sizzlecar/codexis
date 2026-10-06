@@ -264,7 +264,19 @@ pub fn render_with_detail(
         ));
     }
     if !verbose && report.data["kind"] == "overview" {
+        if report.data["flow"].is_object() {
+            let mut text = flow_text(&report.data, 110)?;
+            text.push('\n');
+            text.push_str(crate::localize!(
+                "更多：codexis flow --view errors|config|state|trunks · 详细报告 --verbose · 机器可读 --format json\n",
+                "More: codexis flow --view errors|config|state|trunks · full report --verbose · machine-readable --format json\n"
+            ));
+            return Ok(text);
+        }
         return compact_overview(report);
+    }
+    if report.data["kind"] == "flow" {
+        return flow_text(&report.data, 110);
     }
     if report.data["kind"] == "baseline" {
         let mut out = String::new();
@@ -896,6 +908,11 @@ fn markdown_report(report: &Report<Value>) -> anyhow::Result<String> {
         )?;
     }
     line!(out,"\n源码链接用于位置导航；核查结论时应使用记录的快照与内容标识。","\nSource links help navigate locations; verify conclusions against the recorded snapshot and content hashes.")?;
+    if report.data["kind"] == "overview" && report.data["flow"].is_object() {
+        let map = flow_text(&report.data, 110)?;
+        line!(out, "\n## 脉络图\n", "\n## Flow map\n")?;
+        writeln!(out, "~~~text\n{map}~~~")?;
+    }
     match report.data["kind"].as_str().unwrap_or_default() {
         "overview" | "understanding" => {
             if report.data["kind"] == "overview" && !report.data["baseline"].is_null() {
@@ -1258,4 +1275,21 @@ fn write_edge(out: &mut String, edge: &Value) -> std::fmt::Result {
         label(edge["resolution"].as_str().unwrap_or_default()),
         location(edge)
     )
+}
+
+/// Plain flow views share the interactive layout at a fixed width so output
+/// stays stable when piped or saved.
+pub fn flow_text(data: &Value, width: usize) -> anyhow::Result<String> {
+    let map: crate::flow::FlowMap = serde_json::from_value(data["flow"].clone())?;
+    let rows = match data["view"].as_str().unwrap_or("home") {
+        "errors" => crate::flow::view::errors(&map),
+        "config" => crate::flow::view::config(&map),
+        "state" => crate::flow::view::state(&map),
+        "trunks" => crate::flow::view::trunks(&map),
+        _ => {
+            let header: crate::flow::view::Header = serde_json::from_value(data["header"].clone())?;
+            crate::flow::view::home(&header, &map, width)
+        }
+    };
+    Ok(crate::flow::view::text(&rows))
 }
